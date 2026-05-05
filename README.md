@@ -9,9 +9,11 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)]()
 [![Version](https://img.shields.io/badge/版本-0.4.5-brightgreen.svg)](045.MD)
 
-[GitHub](https://github.com/songshuquant/ssquant) | [Gitee](https://gitee.com/ssquant/ssquant)
+[GitHub](https://github.com/songshuquant/ssquant) | [Gitee](https://gitee.com/ssquant/ssquant) | [主页 quant789.com](https://quant789.com)
 
 **一次编写，三处运行**
+
+> 关注公众号 **松鼠Quant**，获取量化策略、框架更新与会员服务
 
 </div>
 
