@@ -1,5 +1,188 @@
+import os
 import pandas as pd
 import numpy as np
+
+
+class _EquityState:
+    """权益曲线计算用的运行状态对象。
+
+    用 __slots__ + 属性访问替代 dict[str]，让每根 K 线 + 每笔成交的状态读写
+    走 C 层属性查找，避免 dict.get/__setitem__ 的字符串 hash 开销。
+    所有字段语义与原 calculate_results 内的同名局部变量完全一致。
+    """
+
+    __slots__ = (
+        'available_cash', 'total_margin',
+        'cumulative_commission', 'cumulative_slippage',
+        'long_pos', 'long_avg_price',
+        'short_pos', 'short_avg_price',
+    )
+
+    def __init__(self, initial_capital):
+        self.available_cash = float(initial_capital)
+        self.total_margin = 0.0
+        self.cumulative_commission = 0.0
+        self.cumulative_slippage = 0.0
+        self.long_pos = 0
+        self.long_avg_price = 0.0
+        self.short_pos = 0
+        self.short_avg_price = 0.0
+
+
+def _apply_trade_to_equity_state(state, trade, contract_multiplier, margin_rate):
+    """把一笔成交应用到 _EquityState 上（in-place 修改）。
+
+    与原 calculate_results 中权益曲线循环里 6 个动作分支（开多/平多/开空/平空/
+    平多开空/平空开多）的语义、加减顺序、均价规则完全一致。
+    """
+    action = trade['action']
+
+    if action == '开多':
+        volume = trade['volume']
+        price = trade['price']
+        position_cost = price * volume * contract_multiplier
+        margin_required = position_cost * margin_rate
+        commission = trade.get('commission', 0)
+        state.available_cash -= (margin_required + commission)
+        state.total_margin += margin_required
+        state.cumulative_commission += commission
+        state.cumulative_slippage += trade.get('slippage', 0)
+        if state.long_pos > 0:
+            state.long_avg_price = (state.long_pos * state.long_avg_price + volume * price) / (state.long_pos + volume)
+        else:
+            state.long_avg_price = price
+        state.long_pos += volume
+
+    elif action == '平多':
+        volume = min(trade['volume'], state.long_pos)
+        if volume <= 0:
+            return
+        price = trade['price']
+        commission = trade.get('commission', 0)
+        position_value = state.long_avg_price * volume * contract_multiplier
+        margin_released = position_value * margin_rate
+        close_profit = (price - state.long_avg_price) * volume * contract_multiplier
+        state.available_cash += (margin_released + close_profit - commission)
+        state.total_margin -= margin_released
+        state.cumulative_commission += commission
+        state.cumulative_slippage += trade.get('slippage', 0)
+        state.long_pos -= volume
+        if state.long_pos <= 0:
+            state.long_pos = 0
+            state.long_avg_price = 0.0
+
+    elif action == '开空':
+        volume = trade['volume']
+        price = trade['price']
+        position_cost = price * volume * contract_multiplier
+        margin_required = position_cost * margin_rate
+        commission = trade.get('commission', 0)
+        state.available_cash -= (margin_required + commission)
+        state.total_margin += margin_required
+        state.cumulative_commission += commission
+        state.cumulative_slippage += trade.get('slippage', 0)
+        if state.short_pos > 0:
+            state.short_avg_price = (state.short_pos * state.short_avg_price + volume * price) / (state.short_pos + volume)
+        else:
+            state.short_avg_price = price
+        state.short_pos += volume
+
+    elif action == '平空':
+        volume = min(trade['volume'], state.short_pos)
+        if volume <= 0:
+            return
+        price = trade['price']
+        commission = trade.get('commission', 0)
+        position_value = state.short_avg_price * volume * contract_multiplier
+        margin_released = position_value * margin_rate
+        close_profit = (state.short_avg_price - price) * volume * contract_multiplier
+        state.available_cash += (margin_released + close_profit - commission)
+        state.total_margin -= margin_released
+        state.cumulative_commission += commission
+        state.cumulative_slippage += trade.get('slippage', 0)
+        state.short_pos -= volume
+        if state.short_pos <= 0:
+            state.short_pos = 0
+            state.short_avg_price = 0.0
+
+    elif action == '平多开空':
+        volume = trade['volume']
+        price = trade['price']
+        commission = trade.get('commission', 0)
+        slippage_cost = trade.get('slippage', 0)
+        state.cumulative_commission += commission
+        state.cumulative_slippage += slippage_cost
+        close_vol = min(volume, state.long_pos)
+        open_vol = close_vol
+        if close_vol > 0:
+            position_value = state.long_avg_price * close_vol * contract_multiplier
+            margin_released = position_value * margin_rate
+            close_profit = (price - state.long_avg_price) * close_vol * contract_multiplier
+            state.available_cash += (margin_released + close_profit)
+            state.total_margin -= margin_released
+            state.long_pos -= close_vol
+            if state.long_pos <= 0:
+                state.long_pos = 0
+                state.long_avg_price = 0.0
+        state.available_cash -= commission
+        if open_vol > 0:
+            position_cost = price * open_vol * contract_multiplier
+            margin_required = position_cost * margin_rate
+            state.available_cash -= margin_required
+            state.total_margin += margin_required
+            if state.short_pos > 0:
+                state.short_avg_price = (state.short_pos * state.short_avg_price + open_vol * price) / (state.short_pos + open_vol)
+            else:
+                state.short_avg_price = price
+            state.short_pos += open_vol
+
+    elif action == '平空开多':
+        volume = trade['volume']
+        price = trade['price']
+        commission = trade.get('commission', 0)
+        slippage_cost = trade.get('slippage', 0)
+        state.cumulative_commission += commission
+        state.cumulative_slippage += slippage_cost
+        close_vol = min(volume, state.short_pos)
+        open_vol = close_vol
+        if close_vol > 0:
+            position_value = state.short_avg_price * close_vol * contract_multiplier
+            margin_released = position_value * margin_rate
+            close_profit = (state.short_avg_price - price) * close_vol * contract_multiplier
+            state.available_cash += (margin_released + close_profit)
+            state.total_margin -= margin_released
+            state.short_pos -= close_vol
+            if state.short_pos <= 0:
+                state.short_pos = 0
+                state.short_avg_price = 0.0
+        state.available_cash -= commission
+        if open_vol > 0:
+            position_cost = price * open_vol * contract_multiplier
+            margin_required = position_cost * margin_rate
+            state.available_cash -= margin_required
+            state.total_margin += margin_required
+            if state.long_pos > 0:
+                state.long_avg_price = (state.long_pos * state.long_avg_price + open_vol * price) / (state.long_pos + open_vol)
+            else:
+                state.long_avg_price = price
+            state.long_pos += open_vol
+
+
+def _extract_price_array(effective_data):
+    """从 effective_data 提取主价格列为 np.float64 ndarray。
+    K 线: close；Tick: LastPrice；报价: (Bid1+Ask1)/2。
+    """
+    cols = effective_data.columns
+    if 'close' in cols:
+        return effective_data['close'].to_numpy(dtype=np.float64, copy=False)
+    if 'LastPrice' in cols:
+        return effective_data['LastPrice'].to_numpy(dtype=np.float64, copy=False)
+    if 'BidPrice1' in cols and 'AskPrice1' in cols:
+        bid = effective_data['BidPrice1'].to_numpy(dtype=np.float64, copy=False)
+        ask = effective_data['AskPrice1'].to_numpy(dtype=np.float64, copy=False)
+        return (bid + ask) * 0.5
+    raise KeyError("数据中未找到价格字段（close/LastPrice/BidPrice1+AskPrice1）")
+
 
 class BacktestResultCalculator:
     """回测结果计算器，负责计算交易统计、盈亏和绩效指标等"""
@@ -131,7 +314,7 @@ class BacktestResultCalculator:
             trades = ds.trades
             result_end_idx = int(getattr(ds, 'result_end_idx', len(ds.data)) or 0)
             result_end_idx = max(0, min(result_end_idx, len(ds.data)))
-            effective_data = ds.data.iloc[:result_end_idx].copy() if result_end_idx > 0 else ds.data.iloc[0:0].copy()
+            effective_data = ds.data.iloc[:result_end_idx] if result_end_idx > 0 else ds.data.iloc[0:0]
             
             if not trades:
                 self.log(f"数据源 #{ds_idx} ({ds.symbol} {ds.kline_period}) 没有交易记录")
@@ -374,249 +557,40 @@ class BacktestResultCalculator:
             else:
                 profit_factor = float('inf') if _total_win_pnl > 0 else 0
             
-            # 修改权益曲线计算方法，考虑持仓盈亏
-            equity_curve = pd.Series(float(initial_capital), index=effective_data.index, dtype=float)  # 净利润曲线（扣除所有成本）
-            gross_equity_curve = pd.Series(float(initial_capital), index=effective_data.index, dtype=float)  # 毛利润曲线（完全不扣除成本）
-            available_cash = initial_capital  # 可用资金（未被占用的资金）
-            total_margin = 0  # 总保证金占用
-            total_equity = initial_capital  # 总权益（可用资金 + 保证金 + 浮动盈亏）
-            # 累计成本追踪（用于计算毛利润曲线）
-            cumulative_commission = 0  # 累计手续费
-            cumulative_slippage = 0  # 累计滑点成本
-            
-            # 持仓管理
-            long_pos = 0  # 多头持仓量
-            long_avg_price = 0  # 多头平均持仓价格
-            short_pos = 0  # 空头持仓量
-            short_avg_price = 0  # 空头平均持仓价格
-            
-            # 按时间排序交易记录并创建副本，避免修改原始数据
-            sorted_trades = sorted(trades.copy(), key=lambda x: x['datetime'])
-            
-            # 遍历每个时间点
-            for i, date in enumerate(effective_data.index):
-                row = effective_data.iloc[i]
-                # K线数据使用close，TICK数据使用LastPrice
-                if 'close' in row:
-                    current_price = row['close']
-                elif 'LastPrice' in row:
-                    current_price = row['LastPrice']
-                elif 'BidPrice1' in row and 'AskPrice1' in row:
-                    current_price = (row['BidPrice1'] + row['AskPrice1']) / 2
-                else:
-                    raise KeyError("数据中未找到价格字段（close/LastPrice/BidPrice1+AskPrice1）")
-                
-                # 处理当前日期的所有交易
-                trades_to_process = [t for t in sorted_trades if t['datetime'] <= date]
-                trades_to_remove = []  # 存储需要移除的交易索引
-                
-                for trade in trades_to_process:
-                    if trade['action'] == '开多':
-                        # 计算开仓成本和保证金
-                        volume = trade['volume']
-                        price = trade['price']
-                        position_cost = price * volume * contract_multiplier
-                        margin_required = position_cost * margin_rate
-                        commission = trade.get('commission', 0)
-                        
-                        # 更新资金（净利润：扣除手续费）
-                        available_cash -= (margin_required + commission)
-                        total_margin += margin_required
-                        
-                        # 累计成本
-                        cumulative_commission += commission
-                        slippage_cost = trade.get('slippage', 0)
-                        cumulative_slippage += slippage_cost
-                        
-                        # 更新多头持仓和平均价格
-                        if long_pos > 0:
-                            # 计算新的加权平均持仓价格
-                            long_avg_price = (long_pos * long_avg_price + volume * price) / (long_pos + volume)
-                        else:
-                            long_avg_price = price
-                        long_pos += volume
-                        
-                    elif trade['action'] == '平多':
-                        # 获取平仓数量和价格
-                        volume = min(trade['volume'], long_pos)  # 确保不超过实际持仓
-                        if volume <= 0:
-                            continue  # 无多头持仓可平，跳过
-                            
-                        price = trade['price']
-                        commission = trade.get('commission', 0)
-                        
-                        # 计算平仓后释放的保证金
-                        position_value = long_avg_price * volume * contract_multiplier
-                        margin_released = position_value * margin_rate
-                        
-                        # 计算平仓盈亏
-                        close_profit = (price - long_avg_price) * volume * contract_multiplier
-                        
-                        # 更新资金（净利润：扣除手续费）
-                        available_cash += (margin_released + close_profit - commission)
-                        total_margin -= margin_released
-                        
-                        # 累计成本
-                        cumulative_commission += commission
-                        slippage_cost = trade.get('slippage', 0)
-                        cumulative_slippage += slippage_cost
-                        
-                        # 更新多头持仓
-                        long_pos -= volume
-                        # 如果完全平仓，重置平均价格
-                        if long_pos <= 0:
-                            long_pos = 0
-                            long_avg_price = 0
-                        
-                    elif trade['action'] == '开空':
-                        # 计算开仓成本和保证金
-                        volume = trade['volume']
-                        price = trade['price']
-                        position_cost = price * volume * contract_multiplier
-                        margin_required = position_cost * margin_rate
-                        commission = trade.get('commission', 0)
-                        
-                        # 更新资金（净利润：扣除手续费）
-                        available_cash -= (margin_required + commission)
-                        total_margin += margin_required
-                        
-                        # 累计成本
-                        cumulative_commission += commission
-                        slippage_cost = trade.get('slippage', 0)
-                        cumulative_slippage += slippage_cost
-                        
-                        # 更新空头持仓和平均价格
-                        if short_pos > 0:
-                            # 计算新的加权平均持仓价格
-                            short_avg_price = (short_pos * short_avg_price + volume * price) / (short_pos + volume)
-                        else:
-                            short_avg_price = price
-                        short_pos += volume
-                        
-                    elif trade['action'] == '平空':
-                        # 获取平仓数量和价格
-                        volume = min(trade['volume'], short_pos)  # 确保不超过实际持仓
-                        if volume <= 0:
-                            continue  # 无空头持仓可平，跳过
-                            
-                        price = trade['price']
-                        commission = trade.get('commission', 0)
-                        
-                        # 计算平仓后释放的保证金
-                        position_value = short_avg_price * volume * contract_multiplier
-                        margin_released = position_value * margin_rate
-                        
-                        # 计算平仓盈亏
-                        close_profit = (short_avg_price - price) * volume * contract_multiplier
-                        
-                        # 更新资金（净利润：扣除手续费）
-                        available_cash += (margin_released + close_profit - commission)
-                        total_margin -= margin_released
-                        
-                        # 累计成本
-                        cumulative_commission += commission
-                        slippage_cost = trade.get('slippage', 0)
-                        cumulative_slippage += slippage_cost
-                        
-                        # 更新空头持仓
-                        short_pos -= volume
-                        # 如果完全平仓，重置平均价格
-                        if short_pos <= 0:
-                            short_pos = 0
-                            short_avg_price = 0
+            # ===== P10：双指针 + ndarray 增量推进权益曲线（O(B+T)，原 O(B×T²)） =====
+            equity_arr, gross_equity_arr = self._calc_equity_curve_fast(
+                effective_data, trades, initial_capital,
+                contract_multiplier, margin_rate
+            )
 
-                    elif trade['action'] == '平多开空':
-                        volume = trade['volume']
-                        price = trade['price']
-                        commission = trade.get('commission', 0)
-                        slippage_cost = trade.get('slippage', 0)
-                        cumulative_commission += commission
-                        cumulative_slippage += slippage_cost
-                        close_vol = min(volume, long_pos)
-                        open_vol = close_vol
-                        if close_vol > 0:
-                            position_value = long_avg_price * close_vol * contract_multiplier
-                            margin_released = position_value * margin_rate
-                            close_profit = (price - long_avg_price) * close_vol * contract_multiplier
-                            available_cash += (margin_released + close_profit)
-                            total_margin -= margin_released
-                            long_pos -= close_vol
-                            if long_pos <= 0:
-                                long_pos = 0
-                                long_avg_price = 0
-                        available_cash -= commission
-                        if open_vol > 0:
-                            position_cost = price * open_vol * contract_multiplier
-                            margin_required = position_cost * margin_rate
-                            available_cash -= margin_required
-                            total_margin += margin_required
-                            if short_pos > 0:
-                                short_avg_price = (short_pos * short_avg_price + open_vol * price) / (short_pos + open_vol)
-                            else:
-                                short_avg_price = price
-                            short_pos += open_vol
+            # 审计通道：SSQUANT_AUDIT_RESULTS=1 时同步跑老 O(B×T²) 算法逐位对账，
+            # 任何差异立即抛 AssertionError，作为后续优化的安全网。
+            if os.environ.get('SSQUANT_AUDIT_RESULTS') == '1':
+                legacy_eq, legacy_gross = self._calc_equity_curve_legacy(
+                    effective_data, trades, initial_capital,
+                    contract_multiplier, margin_rate
+                )
+                if not np.allclose(equity_arr, legacy_eq, rtol=1e-9, atol=1e-6, equal_nan=True):
+                    diff = np.abs(equity_arr - legacy_eq)
+                    idx = int(np.argmax(diff))
+                    raise AssertionError(
+                        f"[SSQUANT_AUDIT_RESULTS] equity_curve 不一致 "
+                        f"ds={ds.symbol} {ds.kline_period} idx={idx} "
+                        f"fast={equity_arr[idx]} legacy={legacy_eq[idx]} "
+                        f"max_diff={diff.max()}"
+                    )
+                if not np.allclose(gross_equity_arr, legacy_gross, rtol=1e-9, atol=1e-6, equal_nan=True):
+                    diff = np.abs(gross_equity_arr - legacy_gross)
+                    idx = int(np.argmax(diff))
+                    raise AssertionError(
+                        f"[SSQUANT_AUDIT_RESULTS] gross_equity_curve 不一致 "
+                        f"ds={ds.symbol} {ds.kline_period} idx={idx} "
+                        f"fast={gross_equity_arr[idx]} legacy={legacy_gross[idx]} "
+                        f"max_diff={diff.max()}"
+                    )
 
-                    elif trade['action'] == '平空开多':
-                        volume = trade['volume']
-                        price = trade['price']
-                        commission = trade.get('commission', 0)
-                        slippage_cost = trade.get('slippage', 0)
-                        cumulative_commission += commission
-                        cumulative_slippage += slippage_cost
-                        close_vol = min(volume, short_pos)
-                        open_vol = close_vol
-                        if close_vol > 0:
-                            position_value = short_avg_price * close_vol * contract_multiplier
-                            margin_released = position_value * margin_rate
-                            close_profit = (short_avg_price - price) * close_vol * contract_multiplier
-                            available_cash += (margin_released + close_profit)
-                            total_margin -= margin_released
-                            short_pos -= close_vol
-                            if short_pos <= 0:
-                                short_pos = 0
-                                short_avg_price = 0
-                        available_cash -= commission
-                        if open_vol > 0:
-                            position_cost = price * open_vol * contract_multiplier
-                            margin_required = position_cost * margin_rate
-                            available_cash -= margin_required
-                            total_margin += margin_required
-                            if long_pos > 0:
-                                long_avg_price = (long_pos * long_avg_price + open_vol * price) / (long_pos + open_vol)
-                            else:
-                                long_avg_price = price
-                            long_pos += open_vol
-                    
-                    # 标记交易为待移除，而不是直接移除
-                    trades_to_remove.append(trade)
-                
-                # 在循环之外移除已处理的交易
-                for trade in trades_to_remove:
-                    if trade in sorted_trades:
-                        sorted_trades.remove(trade)
-                
-                # 计算多头浮动盈亏
-                long_floating_pnl = 0
-                if long_pos > 0:
-                    long_floating_pnl = (current_price - long_avg_price) * long_pos * contract_multiplier
-                
-                # 计算空头浮动盈亏
-                short_floating_pnl = 0
-                if short_pos > 0:
-                    short_floating_pnl = (short_avg_price - current_price) * short_pos * contract_multiplier
-                
-                # 计算总浮动盈亏
-                total_floating_pnl = long_floating_pnl + short_floating_pnl
-                
-                # 计算当前总权益（净利润：已扣除成本）
-                total_equity = available_cash + total_margin + total_floating_pnl
-                
-                # 计算毛利润总权益（完全不扣除成本：净权益 + 累计手续费 + 累计滑点）
-                gross_total_equity = total_equity + cumulative_commission + cumulative_slippage
-                
-                # 更新权益曲线
-                equity_curve[date] = total_equity
-                gross_equity_curve[date] = gross_total_equity
+            equity_curve = pd.Series(equity_arr, index=effective_data.index, dtype=float)
+            gross_equity_curve = pd.Series(gross_equity_arr, index=effective_data.index, dtype=float)
             
             # 计算期末权益和净值
             final_equity = equity_curve.iloc[-1] if not equity_curve.empty else initial_capital
@@ -763,7 +737,280 @@ class BacktestResultCalculator:
         
         self.results = results
         return results
-    
+
+    # =========================================================================
+    # P10：权益曲线计算 - fast 路径（双指针 + ndarray，O(B+T)）
+    # =========================================================================
+    def _calc_equity_curve_fast(self, effective_data, trades, initial_capital,
+                                 contract_multiplier, margin_rate):
+        """O(B+T) 双指针权益曲线计算。
+
+        替代原 calculate_results 中 393-596 行的 O(B×T²) 实现：
+        - 价格走 ndarray（一次 to_numpy，无 iloc/__getitem__）
+        - 成交按时间排序后用一个游标推进，每根 Bar 仅处理新到期的成交
+        - 权益结果直接写 ndarray，最后一次性构造 pd.Series（避免 B 次标签写入）
+
+        Args:
+            effective_data: 已截到 result_end_idx 的 DataFrame（视图，无需 copy）
+            trades: 该数据源的全部成交列表（不会被修改）
+            initial_capital: 初始资金
+            contract_multiplier: 合约乘数
+            margin_rate: 保证金率
+
+        Returns:
+            (equity_arr, gross_equity_arr): 两个 np.float64 ndarray，
+            长度均等于 len(effective_data)
+        """
+        n_bars = len(effective_data)
+        equity_arr = np.empty(n_bars, dtype=np.float64)
+        gross_equity_arr = np.empty(n_bars, dtype=np.float64)
+        if n_bars == 0:
+            return equity_arr, gross_equity_arr
+
+        price_arr = _extract_price_array(effective_data)
+        bar_dates = effective_data.index
+
+        # 稳定排序：相同 datetime 的成交保留原始相对顺序，与 legacy 实现一致
+        sorted_trades = sorted(trades, key=lambda x: x['datetime'])
+        T = len(sorted_trades)
+        trade_idx = 0
+
+        state = _EquityState(initial_capital)
+
+        for i in range(n_bars):
+            date = bar_dates[i]
+            current_price = price_arr[i]
+
+            # 双指针：把所有 datetime <= date 的成交批量应用
+            while trade_idx < T and sorted_trades[trade_idx]['datetime'] <= date:
+                _apply_trade_to_equity_state(
+                    state, sorted_trades[trade_idx],
+                    contract_multiplier, margin_rate,
+                )
+                trade_idx += 1
+
+            if state.long_pos > 0:
+                long_floating_pnl = (current_price - state.long_avg_price) * state.long_pos * contract_multiplier
+            else:
+                long_floating_pnl = 0.0
+            if state.short_pos > 0:
+                short_floating_pnl = (state.short_avg_price - current_price) * state.short_pos * contract_multiplier
+            else:
+                short_floating_pnl = 0.0
+            total_floating_pnl = long_floating_pnl + short_floating_pnl
+
+            total_equity = state.available_cash + state.total_margin + total_floating_pnl
+            gross_total_equity = total_equity + state.cumulative_commission + state.cumulative_slippage
+
+            equity_arr[i] = total_equity
+            gross_equity_arr[i] = gross_total_equity
+
+        return equity_arr, gross_equity_arr
+
+    # =========================================================================
+    # P10：权益曲线计算 - legacy 路径（O(B×T²)，仅供 SSQUANT_AUDIT_RESULTS=1 对账）
+    # =========================================================================
+    def _calc_equity_curve_legacy(self, effective_data, trades, initial_capital,
+                                   contract_multiplier, margin_rate):
+        """旧版 O(B×T²) 实现，仅供审计对账。
+
+        与原 calculate_results 内的权益曲线循环行为完全一致：
+        - 每根 Bar 用列表推导式过滤未到期成交
+        - 用 list.remove 摘除已处理成交
+        - 用 effective_data.iloc[i] 取价
+        - 用 equity_curve[date] = ... 写 Pandas Series
+
+        返回 ndarray 而非 Series，方便和 fast 版本逐位对比。
+        """
+        n_bars = len(effective_data)
+        equity_arr = np.empty(n_bars, dtype=np.float64)
+        gross_equity_arr = np.empty(n_bars, dtype=np.float64)
+        if n_bars == 0:
+            return equity_arr, gross_equity_arr
+
+        available_cash = float(initial_capital)
+        total_margin = 0.0
+        cumulative_commission = 0.0
+        cumulative_slippage = 0.0
+        long_pos = 0
+        long_avg_price = 0.0
+        short_pos = 0
+        short_avg_price = 0.0
+
+        sorted_trades = sorted(list(trades), key=lambda x: x['datetime'])
+
+        for i, date in enumerate(effective_data.index):
+            row = effective_data.iloc[i]
+            if 'close' in row:
+                current_price = row['close']
+            elif 'LastPrice' in row:
+                current_price = row['LastPrice']
+            elif 'BidPrice1' in row and 'AskPrice1' in row:
+                current_price = (row['BidPrice1'] + row['AskPrice1']) / 2
+            else:
+                raise KeyError("数据中未找到价格字段（close/LastPrice/BidPrice1+AskPrice1）")
+
+            trades_to_process = [t for t in sorted_trades if t['datetime'] <= date]
+            trades_to_remove = []
+
+            for trade in trades_to_process:
+                action = trade['action']
+                if action == '开多':
+                    volume = trade['volume']
+                    price = trade['price']
+                    position_cost = price * volume * contract_multiplier
+                    margin_required = position_cost * margin_rate
+                    commission = trade.get('commission', 0)
+                    available_cash -= (margin_required + commission)
+                    total_margin += margin_required
+                    cumulative_commission += commission
+                    cumulative_slippage += trade.get('slippage', 0)
+                    if long_pos > 0:
+                        long_avg_price = (long_pos * long_avg_price + volume * price) / (long_pos + volume)
+                    else:
+                        long_avg_price = price
+                    long_pos += volume
+
+                elif action == '平多':
+                    volume = min(trade['volume'], long_pos)
+                    if volume <= 0:
+                        trades_to_remove.append(trade)
+                        continue
+                    price = trade['price']
+                    commission = trade.get('commission', 0)
+                    position_value = long_avg_price * volume * contract_multiplier
+                    margin_released = position_value * margin_rate
+                    close_profit = (price - long_avg_price) * volume * contract_multiplier
+                    available_cash += (margin_released + close_profit - commission)
+                    total_margin -= margin_released
+                    cumulative_commission += commission
+                    cumulative_slippage += trade.get('slippage', 0)
+                    long_pos -= volume
+                    if long_pos <= 0:
+                        long_pos = 0
+                        long_avg_price = 0.0
+
+                elif action == '开空':
+                    volume = trade['volume']
+                    price = trade['price']
+                    position_cost = price * volume * contract_multiplier
+                    margin_required = position_cost * margin_rate
+                    commission = trade.get('commission', 0)
+                    available_cash -= (margin_required + commission)
+                    total_margin += margin_required
+                    cumulative_commission += commission
+                    cumulative_slippage += trade.get('slippage', 0)
+                    if short_pos > 0:
+                        short_avg_price = (short_pos * short_avg_price + volume * price) / (short_pos + volume)
+                    else:
+                        short_avg_price = price
+                    short_pos += volume
+
+                elif action == '平空':
+                    volume = min(trade['volume'], short_pos)
+                    if volume <= 0:
+                        trades_to_remove.append(trade)
+                        continue
+                    price = trade['price']
+                    commission = trade.get('commission', 0)
+                    position_value = short_avg_price * volume * contract_multiplier
+                    margin_released = position_value * margin_rate
+                    close_profit = (short_avg_price - price) * volume * contract_multiplier
+                    available_cash += (margin_released + close_profit - commission)
+                    total_margin -= margin_released
+                    cumulative_commission += commission
+                    cumulative_slippage += trade.get('slippage', 0)
+                    short_pos -= volume
+                    if short_pos <= 0:
+                        short_pos = 0
+                        short_avg_price = 0.0
+
+                elif action == '平多开空':
+                    volume = trade['volume']
+                    price = trade['price']
+                    commission = trade.get('commission', 0)
+                    slippage_cost = trade.get('slippage', 0)
+                    cumulative_commission += commission
+                    cumulative_slippage += slippage_cost
+                    close_vol = min(volume, long_pos)
+                    open_vol = close_vol
+                    if close_vol > 0:
+                        position_value = long_avg_price * close_vol * contract_multiplier
+                        margin_released = position_value * margin_rate
+                        close_profit = (price - long_avg_price) * close_vol * contract_multiplier
+                        available_cash += (margin_released + close_profit)
+                        total_margin -= margin_released
+                        long_pos -= close_vol
+                        if long_pos <= 0:
+                            long_pos = 0
+                            long_avg_price = 0.0
+                    available_cash -= commission
+                    if open_vol > 0:
+                        position_cost = price * open_vol * contract_multiplier
+                        margin_required = position_cost * margin_rate
+                        available_cash -= margin_required
+                        total_margin += margin_required
+                        if short_pos > 0:
+                            short_avg_price = (short_pos * short_avg_price + open_vol * price) / (short_pos + open_vol)
+                        else:
+                            short_avg_price = price
+                        short_pos += open_vol
+
+                elif action == '平空开多':
+                    volume = trade['volume']
+                    price = trade['price']
+                    commission = trade.get('commission', 0)
+                    slippage_cost = trade.get('slippage', 0)
+                    cumulative_commission += commission
+                    cumulative_slippage += slippage_cost
+                    close_vol = min(volume, short_pos)
+                    open_vol = close_vol
+                    if close_vol > 0:
+                        position_value = short_avg_price * close_vol * contract_multiplier
+                        margin_released = position_value * margin_rate
+                        close_profit = (short_avg_price - price) * close_vol * contract_multiplier
+                        available_cash += (margin_released + close_profit)
+                        total_margin -= margin_released
+                        short_pos -= close_vol
+                        if short_pos <= 0:
+                            short_pos = 0
+                            short_avg_price = 0.0
+                    available_cash -= commission
+                    if open_vol > 0:
+                        position_cost = price * open_vol * contract_multiplier
+                        margin_required = position_cost * margin_rate
+                        available_cash -= margin_required
+                        total_margin += margin_required
+                        if long_pos > 0:
+                            long_avg_price = (long_pos * long_avg_price + open_vol * price) / (long_pos + open_vol)
+                        else:
+                            long_avg_price = price
+                        long_pos += open_vol
+
+                trades_to_remove.append(trade)
+
+            for trade in trades_to_remove:
+                if trade in sorted_trades:
+                    sorted_trades.remove(trade)
+
+            if long_pos > 0:
+                long_floating_pnl = (current_price - long_avg_price) * long_pos * contract_multiplier
+            else:
+                long_floating_pnl = 0.0
+            if short_pos > 0:
+                short_floating_pnl = (short_avg_price - current_price) * short_pos * contract_multiplier
+            else:
+                short_floating_pnl = 0.0
+            total_floating_pnl = long_floating_pnl + short_floating_pnl
+
+            total_equity = available_cash + total_margin + total_floating_pnl
+            gross_total_equity = total_equity + cumulative_commission + cumulative_slippage
+
+            equity_arr[i] = total_equity
+            gross_equity_arr[i] = gross_total_equity
+
+        return equity_arr, gross_equity_arr
+
     def get_summary(self, results=None):
         """获取回测结果摘要
         

@@ -596,10 +596,9 @@ def get_futures_data(
             return pd.DataFrame()
     
     # ========== K线数据处理 ==========
-    # 检查是否提供了用户名和密码
-    if not username or not password:
-        raise ValueError("必须提供API用户名和密码")
-    
+    # 注意: username/password 的空值检查推迟到实际调用 fetch_data_from_api 之前
+    # 这样本地 SQLite 缓存完全覆盖时无需账号即可直接返回数据
+
     # ========== 判断请求模式 ==========
     # 模式优先级: start_time/end_time > start_date/end_date > limit
     use_limit_only = False

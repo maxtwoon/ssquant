@@ -108,7 +108,54 @@ class BacktestDataManager:
                             self.log(f"本地数据加载失败: {e}")
                             # 继续尝试API/数据库
                 
-                # 原有API/数据库分支
+                # ========== 本地数据模式：直接读取 SQLite，不走远程 API ==========
+                if base_config.get('data_source_mode') == 'local':
+                    from ..data.api_data_fetcher import get_cache_db_and_table, read_from_sqlite
+                    db_path, table_name = get_cache_db_and_table(symbol, kline_period, 'data_cache', adjust_type)
+                    
+                    if not os.path.exists(db_path):
+                        self.log(f"\n{'='*60}")
+                        self.log(f"【本地数据模式】数据库不存在: {db_path}")
+                        self.log(f"请使用 examples/A_工具_导入数据库DB示例.py 导入本地数据")
+                        self.log(f"支持格式: CSV / Excel / JSON / Parquet / Feather / Pickle")
+                        self.log(f"{'='*60}\n")
+                        continue
+                    
+                    try:
+                        df = read_from_sqlite(db_path, table_name)
+                        if df is None or df.empty:
+                            self.log(f"\n{'='*60}")
+                            self.log(f"【本地数据模式】表 {table_name} 为空或不存在")
+                            self.log(f"请使用 examples/A_工具_导入数据库DB示例.py 导入本地数据")
+                            self.log(f"支持格式: CSV / Excel / JSON / Parquet / Feather / Pickle")
+                            self.log(f"{'='*60}\n")
+                            continue
+                        
+                        # 日期筛选
+                        df['datetime'] = pd.to_datetime(df['datetime'])
+                        start_dt = data_params.get('start_date')
+                        end_dt = data_params.get('end_date')
+                        if start_dt:
+                            df = df[df['datetime'] >= pd.to_datetime(start_dt)]
+                        if end_dt:
+                            df = df[df['datetime'] <= pd.to_datetime(end_dt)]
+                        
+                        if df.empty:
+                            self.log(f"【本地数据模式】表 {table_name} 在指定日期范围内无数据")
+                            continue
+                        
+                        df = df.set_index('datetime')
+                        key = f"{symbol}_{kline_period}_{adjust_type}"
+                        data_dict[key] = df
+                        self.log(f"【本地数据模式】从 {table_name} 加载 {len(df)} 条K线数据")
+                        continue
+                    except Exception as e:
+                        self.log(f"【本地数据模式】读取本地数据失败: {e}")
+                        self.log(f"请检查数据库文件或使用 examples/A_工具_导入数据库DB示例.py 重新导入数据")
+                        self.log(f"支持格式: CSV / Excel / JSON / Parquet / Feather / Pickle")
+                        continue
+                
+                # ========== 远程数据模式（原有逻辑）==========
                 self.log(f"获取 {symbol} {kline_period} {'不复权' if adjust_type == '0' else '后复权'} 数据...")
                 
                 try:

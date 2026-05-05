@@ -7,6 +7,7 @@
 """
 
 import time
+import numpy as np
 import pandas as pd
 import os
 from datetime import datetime
@@ -351,6 +352,24 @@ class LiveDataSource:
         # data_server 模式：历史数据通过 WebSocket preload 获取，不走本地预加载
         self._need_preload = config.get('preload_history', False) and self.kline_source != 'data_server'
         self._preload_config = config
+
+        # ====== IndicatorCache v2（实盘 / SIMNOW 流式增量预计算） ======
+        # 与 DataSource（回测）IndicatorCache 完全相同的 API 语义：
+        #   register_indicator / unregister_indicator / get_indicator / get_indicator_array
+        # 区别：
+        #   - 回测：set_data() 一次性预计算全量
+        #   - 实盘：每根 K 线写入后基于 deque 当前内容全量重算（O(maxlen)，maxlen<=1000，~ms 级）
+        # _indicator_registry: name -> {'func': callable, 'window': Optional[int]}
+        # _indicator_arrays:   name -> np.ndarray（长度 == len(self.klines)，主循环 O(1) 查表）
+        self._indicator_registry: Dict[str, Dict[str, Any]] = {}
+        self._indicator_arrays: Dict[str, np.ndarray] = {}
+        # OHLCV ndarray 缓存（K 线写入时 invalidate，按需重建；register/重算前确保最新）
+        self._ohlcv_cache_dirty: bool = True
+        self._cache_close: Optional[np.ndarray] = None
+        self._cache_open: Optional[np.ndarray] = None
+        self._cache_high: Optional[np.ndarray] = None
+        self._cache_low: Optional[np.ndarray] = None
+        self._cache_volume: Optional[np.ndarray] = None
     
     def _preload_historical_data(self, config: Dict):
         """预加载历史数据（支持K线和TICK两种模式）"""
@@ -388,7 +407,8 @@ class LiveDataSource:
             self.kline_period,
             lookback_bars=lookback_bars,
             adjust_type=adjust_type,
-            history_symbol=history_symbol
+            history_symbol=history_symbol,
+            kline_source=self.kline_source
         )
         
         if not historical_df.empty:
@@ -415,6 +435,10 @@ class LiveDataSource:
             
             print(f"[LiveDataSource] ✅ 已预加载 {len(self.klines)} 根历史K线")
             print(f"[LiveDataSource] 历史数据范围: {historical_df.index[0]} 至 {historical_df.index[-1]}\n")
+
+            # IndicatorCache v2: 历史数据已就绪，触发已注册指标的初始全量预计算
+            self._invalidate_ohlcv_cache()
+            self._recompute_all_indicators()
         else:
             print(f"[LiveDataSource] ⚠️ 未加载到历史K线数据\n")
     
@@ -496,9 +520,14 @@ class LiveDataSource:
             if current_time - insert_time > self.order_timeout:
                 print(f"[智能追单] 订单超时撤单: {order_sys_id} 已等待{current_time - insert_time:.1f}秒 (阈值:{self.order_timeout}秒)")
                 
-                # 标记该订单需要重发
-                # 记录重发次数，初始为0
-                self.orders_to_resend[order_sys_id] = 0
+                # 标记该订单需要重发（勿覆盖「继承」的重试计数，否则第 2 次及以后重发会始终被视为第 1 次）
+                if order_sys_id not in self.orders_to_resend:
+                    self.orders_to_resend[order_sys_id] = 0
+                
+                # 撤单回报中 OrderSysID 偶发为空，提前登记 FrontID:SessionID:OrderRef 备用键
+                adapter = getattr(self, 'trading_adapter', None)
+                if adapter:
+                    adapter.register_algo_timeout_resend(self, order, order_sys_id)
                 
                 # 发送撤单请求
                 exchange_id = order.get('ExchangeID', '')
@@ -699,7 +728,10 @@ class LiveDataSource:
                 # 增加K线计数器（不受deque长度限制）
                 self.kline_count += 1
                 self.current_idx = self.kline_count - 1
-            
+                # IndicatorCache v2: 新 K 线已落定，标记缓存脏 + 重算所有指标
+                self._invalidate_ohlcv_cache()
+                self._recompute_all_indicators()
+
             # 创建新K线时，记录起始成交量和持仓量
             self.kline_start_volume = current_volume
             self.kline_start_open_interest = current_open_interest
@@ -817,7 +849,196 @@ class LiveDataSource:
         if df.empty:
             return pd.Series(dtype=float)
         return pd.Series(df['volume'])
-    
+
+    # ============================================================
+    # ====== 方式二：NumPy 数组 API（中性能档位，零 Pandas 开销） ======
+    # ============================================================
+    # 与 DataSource（回测）的 get_xxx_array 行为对齐：
+    #   - 直接基于 deque 拷贝出 ndarray（实盘 deque 长度 ≤ maxlen，开销可忽略）
+    #   - window=None / 0 时返回全部缓存；window>0 时返回最近 window 根
+    # 注意：deque 在另一线程被修改时存在轻微竞争，但实盘 K 线写入与策略主循环串行，
+    # 这里走主线程查询路径，无需加锁。
+    def _ensure_ohlcv_cache(self):
+        """构建 OHLCV ndarray 缓存。每次 K 线写入后置 dirty，按需重建。"""
+        if not self._ohlcv_cache_dirty and self._cache_close is not None:
+            return
+        n = len(self.klines)
+        if n == 0:
+            self._cache_close = np.empty(0, dtype=np.float64)
+            self._cache_open = np.empty(0, dtype=np.float64)
+            self._cache_high = np.empty(0, dtype=np.float64)
+            self._cache_low = np.empty(0, dtype=np.float64)
+            self._cache_volume = np.empty(0, dtype=np.float64)
+            self._ohlcv_cache_dirty = False
+            return
+        # 一次遍历，5 个字段同时填充（避免 5 次 list comprehension）
+        close_arr = np.empty(n, dtype=np.float64)
+        open_arr = np.empty(n, dtype=np.float64)
+        high_arr = np.empty(n, dtype=np.float64)
+        low_arr = np.empty(n, dtype=np.float64)
+        vol_arr = np.empty(n, dtype=np.float64)
+        for i, k in enumerate(self.klines):
+            close_arr[i] = k.get('close', np.nan)
+            open_arr[i] = k.get('open', np.nan)
+            high_arr[i] = k.get('high', np.nan)
+            low_arr[i] = k.get('low', np.nan)
+            vol_arr[i] = k.get('volume', 0.0)
+        self._cache_close = close_arr
+        self._cache_open = open_arr
+        self._cache_high = high_arr
+        self._cache_low = low_arr
+        self._cache_volume = vol_arr
+        self._ohlcv_cache_dirty = False
+
+    def _invalidate_ohlcv_cache(self):
+        """K 线写入入口调用：标记 OHLCV ndarray 缓存失效。"""
+        self._ohlcv_cache_dirty = True
+
+    def _slice_array(self, arr: Optional[np.ndarray], window: Optional[int]) -> np.ndarray:
+        if arr is None or arr.size == 0:
+            return np.empty(0, dtype=np.float64)
+        if window is None or window <= 0:
+            return arr
+        if window >= arr.size:
+            return arr
+        return arr[-int(window):]
+
+    def get_close_array(self, window: Optional[int] = None) -> np.ndarray:
+        """获取收盘价 ndarray（实盘版）。window=None/0 返回全部缓存。"""
+        self._ensure_ohlcv_cache()
+        return self._slice_array(self._cache_close, window)
+
+    def get_open_array(self, window: Optional[int] = None) -> np.ndarray:
+        """获取开盘价 ndarray（实盘版）。"""
+        self._ensure_ohlcv_cache()
+        return self._slice_array(self._cache_open, window)
+
+    def get_high_array(self, window: Optional[int] = None) -> np.ndarray:
+        """获取最高价 ndarray（实盘版）。"""
+        self._ensure_ohlcv_cache()
+        return self._slice_array(self._cache_high, window)
+
+    def get_low_array(self, window: Optional[int] = None) -> np.ndarray:
+        """获取最低价 ndarray（实盘版）。"""
+        self._ensure_ohlcv_cache()
+        return self._slice_array(self._cache_low, window)
+
+    def get_volume_array(self, window: Optional[int] = None) -> np.ndarray:
+        """获取成交量 ndarray（实盘版）。"""
+        self._ensure_ohlcv_cache()
+        return self._slice_array(self._cache_volume, window)
+
+    # ============================================================
+    # ====== 方式一：IndicatorCache v2（实盘 / SIMNOW 增量预计算） ======
+    # ============================================================
+    # 与 DataSource（回测）IndicatorCache 完全相同的对外 API：
+    #   register_indicator(name, func, window=None) -> np.ndarray
+    #   unregister_indicator(name) -> bool
+    #   get_indicator(name) -> float
+    #   get_indicator_array(name, window=None) -> np.ndarray
+    # 内部实现差异：
+    #   - 回测：set_data() 一次性预计算全量（一次性 O(N)）
+    #   - 实盘：每根新 K 线写入入口触发 _recompute_all_indicators()，全量重算 deque 当前内容
+    #          （N=len(self.klines) ≤ maxlen ≤ 1000，pandas/numpy 矢量化耗时 < 1ms / 指标）
+    # 选择"全量重算 over 增量"的原因：
+    #   1. 数值与回测路径逐位等价（用户 func 一份代码，回测+实盘都能跑）
+    #   2. 不用处理 EMA 等递归指标的窗口切片初始值问题
+    #   3. 不用维护 deque 滚动 ↔ ndarray 滚动的同步逻辑（一次性算）
+    #   4. 实盘 1m K 线频率下 CPU 占用 < 0.005%，远低于网络/CTP 报单链路开销
+    def register_indicator(self, name: str, func: Callable, window: Optional[int] = None) -> np.ndarray:
+        """注册一个自定义指标，引擎在每根新 K 线时自动重算（全量）。
+
+        Args:
+            name: 指标名（同一 LiveDataSource 内唯一，重名会覆盖）
+            func: 计算函数 func(close, open, high, low, volume) -> np.ndarray
+                  必须返回与输入等长的 ndarray，可包含 NaN（前 N 根没法算的位置）
+            window: 该指标依赖的最大窗口（仅作元信息，实盘下未直接使用，保留 API 兼容）
+
+        Returns:
+            np.ndarray: 当前缓存下预计算好的指标值数组（长度 == len(self.klines)）
+        """
+        if not callable(func):
+            raise TypeError(f"register_indicator: func 必须是 callable，得到 {type(func)}")
+        self._indicator_registry[name] = {'func': func, 'window': window}
+        return self._recompute_indicator(name)
+
+    def unregister_indicator(self, name: str) -> bool:
+        """移除一个已注册的指标，返回是否成功移除。"""
+        ok = self._indicator_registry.pop(name, None) is not None
+        self._indicator_arrays.pop(name, None)
+        return ok
+
+    def _recompute_indicator(self, name: str) -> Optional[np.ndarray]:
+        """对单个已注册指标做一次全量预计算，结果写入 _indicator_arrays。"""
+        spec = self._indicator_registry.get(name)
+        if spec is None:
+            return None
+        # OHLCV 缓存若已脏，先重建
+        self._ensure_ohlcv_cache()
+        n = len(self.klines)
+        if n == 0:
+            self._indicator_arrays[name] = np.full(0, np.nan, dtype=np.float64)
+            return self._indicator_arrays[name]
+
+        close = self._cache_close
+        open_ = self._cache_open
+        high = self._cache_high
+        low = self._cache_low
+        volume = self._cache_volume
+
+        try:
+            arr = spec['func'](close, open_, high, low, volume)
+        except Exception as exc:
+            raise RuntimeError(
+                f"register_indicator: 指标 '{name}' 的计算函数抛错: {exc}"
+            ) from exc
+
+        if not isinstance(arr, np.ndarray):
+            arr = np.asarray(arr, dtype=np.float64)
+        if arr.dtype != np.float64:
+            arr = arr.astype(np.float64, copy=False)
+        if arr.shape[0] != n:
+            raise ValueError(
+                f"register_indicator: 指标 '{name}' 返回长度 {arr.shape[0]} != "
+                f"K 线缓存长度 {n}，必须返回与输入等长的数组"
+            )
+        self._indicator_arrays[name] = arr
+        return arr
+
+    def _recompute_all_indicators(self):
+        """重算所有已注册指标。在每个 K 线写入入口结束时被调用。
+
+        若没有注册任何指标，立即返回（零开销）。
+        """
+        if not self._indicator_registry:
+            return
+        # 先把 OHLCV 缓存重建一次，避免每个指标都 dirty-check
+        self._invalidate_ohlcv_cache()
+        self._ensure_ohlcv_cache()
+        for name in list(self._indicator_registry.keys()):
+            self._recompute_indicator(name)
+
+    def get_indicator(self, name: str) -> float:
+        """获取已注册指标在当前 Bar（最新一根 K 线）的值（标量），O(1)。
+
+        若指标未注册或缓存为空，返回 NaN。
+        """
+        arr = self._indicator_arrays.get(name)
+        if arr is None or arr.size == 0:
+            return float('nan')
+        return float(arr[-1])
+
+    def get_indicator_array(self, name: str, window: Optional[int] = None) -> np.ndarray:
+        """获取已注册指标的最近 window 个值（ndarray，零拷贝视图或子视图）。
+
+        - window=None / 0 时返回全部缓存
+        - window>0 时返回 arr[-window:]
+        """
+        arr = self._indicator_arrays.get(name)
+        if arr is None or arr.size == 0:
+            return np.empty(0, dtype=np.float64)
+        return self._slice_array(arr, window)
+
     def get_tick(self) -> Optional[Dict]:
         """获取当前最新的tick数据"""
         if self.ticks:
@@ -886,7 +1107,11 @@ class LiveDataSource:
         
         # 更新 last_kline_time（用于状态一致性）
         self.last_kline_time = kline_data.get('datetime')
-        
+
+        # IndicatorCache v2: 新 K 线已追加，重算所有已注册指标
+        self._invalidate_ohlcv_cache()
+        self._recompute_all_indicators()
+
         return kline_data
     
     def on_ws_history(self, klines_list: list):
@@ -913,15 +1138,35 @@ class LiveDataSource:
             for kline in klines_list:
                 self.klines.append(kline)
         else:
-            # 已有数据：只追加比最后一根更新的K线（处理重连重叠）
+            # 已有数据：按 datetime 去重合并，历史 K 线（数据库 OHLC 通常更完整）覆盖现有缓存。
+            # 同时正确处理三类混合段：
+            #   later   (> 缓存末尾): 重连补新
+            #   equal   (== 缓存末尾): 覆盖（数据库 close 更准确）
+            #   earlier (< 缓存末尾): 实时 K 线先到时的前向补全（不再被丢弃）
             last_dt = self.klines[-1].get('datetime')
+            cache_by_dt = {k.get('datetime'): k for k in self.klines}
             appended = 0
+            prepend_or_filled = 0
+            overwritten = 0
             for kline in klines_list:
-                if last_dt is None or kline['datetime'] > last_dt:
-                    self.klines.append(kline)
-                    appended += 1
+                dt = kline['datetime']
+                if dt in cache_by_dt:
+                    cache_by_dt[dt] = kline
+                    overwritten += 1
+                else:
+                    cache_by_dt[dt] = kline
+                    if last_dt is not None and dt > last_dt:
+                        appended += 1
+                    else:
+                        prepend_or_filled += 1
+            # 重排：保证整体时间正序（O(n log n)，仅在 on_ws_history 被调用时触发，频率极低）
+            self.klines = sorted(cache_by_dt.values(), key=lambda x: x.get('datetime'))
             if appended > 0:
                 print(f"[LiveDataSource] 重连历史补充: +{appended} 条新K线 ({self.symbol})")
+            if prepend_or_filled > 0:
+                print(f"[LiveDataSource] 历史前向补全: +{prepend_or_filled} 条早于缓存的K线 ({self.symbol})")
+            if overwritten > 0:
+                print(f"[LiveDataSource] 历史覆盖刷新: {overwritten} 条同时间戳K线以历史 OHLC 为准 ({self.symbol})")
         
         # 更新计数器
         self.kline_count = len(self.klines)
@@ -943,6 +1188,10 @@ class LiveDataSource:
             print(f"[LiveDataSource] 缓存最新K线: {last.get('datetime')} | "
                   f"O:{last.get('open')} H:{last.get('high')} L:{last.get('low')} C:{last.get('close')} "
                   f"V:{last.get('volume')}")
+
+        # IndicatorCache v2: data_server 历史灌入 / 重连合并完毕，重算所有已注册指标
+        self._invalidate_ohlcv_cache()
+        self._recompute_all_indicators()
     
     def buy(self, volume: int = 1, reason: str = "", log_callback=None, order_type: str = 'bar_close', offset_ticks: Optional[int] = None, price: Optional[float] = None):
         """买入开仓
@@ -1576,7 +1825,7 @@ class LiveTradingAdapter:
         self.ws_kline_client = None
         self._ws_subscription_map = {}  # (ws_symbol, period) -> LiveDataSource
         self._strategy_lock = threading.Lock()  # 策略执行锁（防止tick线程和WS线程并发调用）
-        self._kline_source = config.get('kline_source', 'local')
+        self._kline_source = config.get('kline_source', 'data_server')
         self._ws_preload_done = threading.Event()
         self._ws_preload_expected = 0
         self._ws_preload_received = 0
@@ -1589,6 +1838,17 @@ class LiveTradingAdapter:
         
         # 自动换月引擎（run() 内 _init_data_source 之后创建）
         self._rollover_engine = None
+        
+        # 智能追单：超时撤单后「重发」匹配用（OrderSysID 为空时用 FrontID+SessionID+OrderRef）
+        self._algo_timeout_resend: Dict[str, Any] = {}
+        # 重发登记 TTL（秒）：超过该时长仍未被撤单回报命中的登记自动清理；0 或负数关闭清理
+        # 默认 300 秒，远大于典型 ORDER_TIMEOUT × RETRY_LIMIT，避免清理掉正常等回报的登记
+        self._algo_resend_plan_ttl: float = float(config.get('algo_resend_plan_ttl', 300.0))
+        # 智能追单 · 重试次数继承队列（B4 修复）：按 (InstrumentID, Direction, OffsetFlag[0]) 三元组在 TTL 内 FIFO 匹配，
+        # 取代原先的全局 ds._next_order_retry_count 标志位，避免重发瞬间的并发新订单错继承重试次数。
+        self._pending_inherit: List[Dict[str, Any]] = []
+        # 三元组队列 TTL（秒）：默认 10 秒，足以覆盖一次重发提交→新订单回报的链路；可通过 config 调整
+        self._pending_inherit_ttl: float = float(config.get('algo_inherit_ttl', 10.0))
         
         print(f"[实盘适配器] 初始化 - 模式: {mode}")
         print(
@@ -1639,11 +1899,26 @@ class LiveTradingAdapter:
     
     def run(self) -> Dict[str, Any]:
         """运行实盘交易"""
-        # ========== 鉴权检查（kanpan789 验证账号） ==========
+        # ========== 鉴权检查（仅使用 data_server 远程 K 线时需要） ==========
         from ..data.auth_manager import verify_auth, get_auth_message, set_effective_data_server
         set_effective_data_server(self.config.get('data_server'))
-        if not verify_auth():
-            raise RuntimeError(f"鉴权失败: {get_auth_message()}")
+        if self._kline_source == 'data_server':
+            if not verify_auth():
+                auth_msg = get_auth_message()
+                raise RuntimeError(
+                    f"\n{'='*70}\n"
+                    f"【当前 K 线源: data_server】需要松鼠俱乐部会员账号才能接收远程 K 线推送。\n"
+                    f"鉴权失败原因: {auth_msg}\n"
+                    f"{'='*70}\n"
+                    f"\n解决方案（二选一）:\n"
+                    f"\n1) 申请俱乐部会员并配置账号:\n"
+                    f"   联系小松鼠 微信: viquant01\n"
+                    f"   然后在 ssquant/config/trading_config.py 中填写俱乐部账号(API_USERNAME)和俱乐部密码(API_PASSWORD)\n"
+                    f"\n2) 切换到 CTP 本地 K 线模式（无需会员）:\n"
+                    f"   在 get_config() 中将参数改为: kline_source='local'\n"
+                    f"   此模式下 CTP 自动从交易所 Tick 合成 K 线，完全免费\n"
+                    f"{'='*70}"
+                )
         
         # 初始化CTP客户端
         self._init_ctp_client()
@@ -1843,6 +2118,9 @@ class LiveTradingAdapter:
         
         # 创建多数据源容器(兼容回测API)
         self.multi_data_source = MultiDataSource(data_sources)
+        # 反向引用：让数据源在超时撤单时能登记重发计划到适配器
+        for _ds in data_sources:
+            _ds.trading_adapter = self
     
     def _parallel_preload(self, data_sources: list):
         """并行预加载所有数据源的历史数据"""
@@ -2449,6 +2727,192 @@ class LiveTradingAdapter:
             except Exception as e:
                 print(f"[用户成交查询完成回调错误] {e}")
     
+    @staticmethod
+    def _algo_order_lookup_keys(order_like: Dict) -> List[str]:
+        """用于超时撤单后匹配「重发」计划：OrderSysID 与 FrontID+SessionID+OrderRef。"""
+        keys: List[str] = []
+        osid = order_like.get('OrderSysID')
+        if osid is not None and str(osid).strip() != '':
+            keys.append(str(osid).strip())
+        try:
+            fr = order_like.get('FrontID')
+            se = order_like.get('SessionID')
+            ref = order_like.get('OrderRef', '')
+            if fr is not None and se is not None and ref != '':
+                keys.append(f"{fr}:{se}:{ref}")
+        except Exception:
+            pass
+        return keys
+    
+    def _gc_algo_timeout_resend(self, now: Optional[float] = None) -> int:
+        """清理超过 TTL 的重发登记，返回清理条数。
+        
+        TTL 由 self._algo_resend_plan_ttl 控制；<=0 视为关闭清理。
+        以 plan['ts'] 为基准（同一 plan 多键的时间戳一致），过期时一并清掉所有指向该 plan 的键。
+        """
+        ttl = getattr(self, '_algo_resend_plan_ttl', 300.0) or 0.0
+        if ttl <= 0:
+            return 0
+        if now is None:
+            now = time.time()
+        cutoff = now - ttl
+        # 收集过期 plan 标识（用 id() 而非对象本身，避免后续 pop 影响识别）
+        expired_plan_ids = set()
+        for plan in self._algo_timeout_resend.values():
+            if isinstance(plan, dict):
+                ts = plan.get('ts', 0) or 0
+                if ts and ts < cutoff:
+                    expired_plan_ids.add(id(plan))
+        if not expired_plan_ids:
+            return 0
+        # 把所有指向过期 plan 的键一并删除
+        dead_keys = [k for k, p in self._algo_timeout_resend.items() if id(p) in expired_plan_ids]
+        for k in dead_keys:
+            self._algo_timeout_resend.pop(k, None)
+        if dead_keys:
+            ttl_disp = f"{ttl:.1f}s" if ttl < 10 else f"{ttl:.0f}s"
+            print(f"[智能追单] 清理过期重发登记 {len(dead_keys)} 项（TTL={ttl_disp}）")
+        return len(dead_keys)
+    
+    def register_algo_timeout_resend(self, ds: 'LiveDataSource', order: Dict, order_sys_id: str) -> None:
+        """超时撤单前登记：撤单回报到达时凭多键查找并触发重发。"""
+        if not getattr(ds, 'algo_trading', False):
+            return
+        # 入口顺手做一次 TTL 清理，避免长期运行时残留
+        self._gc_algo_timeout_resend()
+        merged = {**order, 'OrderSysID': order_sys_id or order.get('OrderSysID', '')}
+        rc = ds.orders_to_resend.get(order_sys_id, 0)
+        plan = {'ds': ds, 'retry_count': rc, 'ts': time.time()}
+        for k in self._algo_order_lookup_keys(merged):
+            if k:
+                self._algo_timeout_resend[k] = plan
+    
+    def pop_algo_timeout_resend_plan(self, cancel_data: Dict):
+        """撤单回报中解析键并取出重发计划（同一 plan 的多键一并清理）。"""
+        # 命中前先清一次过期登记，避免 OrderRef 后缀兜底误匹到上一会话残留键（B3）
+        self._gc_algo_timeout_resend()
+        for k in self._algo_order_lookup_keys(cancel_data):
+            if not k:
+                continue
+            plan = self._algo_timeout_resend.pop(k, None)
+            if plan is None:
+                continue
+            dead = [kk for kk, pp in list(self._algo_timeout_resend.items()) if pp is plan]
+            for kk in dead:
+                self._algo_timeout_resend.pop(kk, None)
+            return plan
+        # 撤单回报里 OrderSysID 偶发为空且未带全 FrontID/SessionID 时，用 OrderRef 后缀匹配已登记的「前置:会话:报单引用」键
+        ref = str(cancel_data.get('OrderRef') or '').strip()
+        if ref:
+            suffix = ':' + ref
+            for k, plan in list(self._algo_timeout_resend.items()):
+                if k.endswith(suffix):
+                    self._algo_timeout_resend.pop(k, None)
+                    dead = [kk for kk, pp in list(self._algo_timeout_resend.items()) if pp is plan]
+                    for kk in dead:
+                        self._algo_timeout_resend.pop(kk, None)
+                    return plan
+        return None
+    
+    # =========================================================================
+    # 智能追单 · 重试次数继承队列（B4 修复）
+    # =========================================================================
+    # 背景：旧实现把"待继承的 retry_count"写到 ds._next_order_retry_count（全局标志位）。
+    #       从重发提交（CTP send_order 返回）到新订单 OnRtnOrder 回调期间，如果策略其它路径恰好
+    #       提交了一笔无关订单，会把那笔订单错认为重发的"接班人"，继承到错误的重试次数。
+    # 修法：以 (InstrumentID, Direction, OffsetFlag[0]) 三元组在 TTL 内 FIFO 匹配；
+    #       多品种/多方向/不同开平时彻底隔离；同 instrument+direction+offset 的并发新单仍然有
+    #       竞争窗口，但相比"全局标志位"已经把误匹概率从"任意订单"缩小到"完全同方向同开平的
+    #       并发订单"。`_next_order_retry_count` 保留作为兜底分支以兼容自定义/外部调用。
+
+    def _gc_pending_inherit(self, now: Optional[float] = None) -> int:
+        """清理超过 TTL 的继承登记。"""
+        ttl = getattr(self, '_pending_inherit_ttl', 10.0) or 0.0
+        if ttl <= 0 or not self._pending_inherit:
+            return 0
+        if now is None:
+            now = time.time()
+        cutoff = now - ttl
+        before = len(self._pending_inherit)
+        self._pending_inherit = [p for p in self._pending_inherit if (p.get('ts', 0) or 0) >= cutoff]
+        n = before - len(self._pending_inherit)
+        if n:
+            ttl_disp = f"{ttl:.1f}s" if ttl < 10 else f"{ttl:.0f}s"
+            print(f"[智能追单] 清理过期继承登记 {n} 项（TTL={ttl_disp}）")
+        return n
+
+    def _register_pending_inherit(self, instrument: str, direction: str, offset: str, retry_count: int) -> None:
+        """登记下一笔同 (instrument, direction, offset) 订单需要继承的重试次数。"""
+        self._gc_pending_inherit()
+        self._pending_inherit.append({
+            'instrument': instrument or '',
+            'direction': direction or '',
+            'offset': (offset or '0')[:1] or '0',
+            'retry_count': int(retry_count),
+            'ts': time.time(),
+        })
+
+    def _consume_pending_inherit(self, ds: 'LiveDataSource', data: Dict, order_sys_id: str) -> bool:
+        """新订单进入 pending 时，按三元组在 TTL 内 FIFO 消耗一份待继承重试次数。命中返回 True。"""
+        if not self._pending_inherit:
+            return False
+        self._gc_pending_inherit()
+        instrument = data.get('InstrumentID', '') or ''
+        direction = data.get('Direction', '') or ''
+        offset_flag = data.get('CombOffsetFlag', '0') or '0'
+        of0 = offset_flag[0] if offset_flag else '0'
+        for i, p in enumerate(self._pending_inherit):
+            if (p.get('instrument') == instrument
+                    and p.get('direction') == direction
+                    and p.get('offset') == of0):
+                ds.orders_to_resend[order_sys_id] = p['retry_count']
+                print(f"[智能追单] 订单 {order_sys_id} 已继承重试次数: {p['retry_count']} (三元组队列匹配)")
+                self._pending_inherit.pop(i)
+                return True
+        return False
+    
+    def _execute_algo_resend_after_cancel(self, ds: 'LiveDataSource', retry_count: int, data: Dict) -> None:
+        """撤单成功后按原方向/开平重发一笔（更激进 retry_offset_ticks）。"""
+        offset_flag = data.get('CombOffsetFlag', '0') or '0'
+        of0 = offset_flag[0] if offset_flag else '0'
+        order_sys_id = data.get('OrderSysID', '') or ''
+        volume_original = int(data.get('VolumeTotalOriginal', 0) or 0)
+        volume_traded = int(data.get('VolumeTraded', 0) or 0)
+        volume_left = volume_original - volume_traded
+        
+        if order_sys_id:
+            ds.orders_to_resend.pop(order_sys_id, None)
+        
+        if retry_count >= ds.retry_limit:
+            print(f"[智能追单] 达到最大重试次数 ({ds.retry_limit})，停止追单")
+            return
+        if volume_left <= 0:
+            return
+        
+        print(f"[智能追单] 触发重发: 剩余重试次数 {ds.retry_limit - retry_count - 1}")
+        retry_offset = ds.retry_offset_ticks
+        
+        # 【B4 修复】先登记三元组继承计划：(instrument, direction, offset[0])
+        # 这样 _on_order 收到新订单时会按 instrument/direction/offset 精确匹配，避免在重发提交→新订单回报
+        # 之间到达的"无关订单"被错认为接班人。`_next_order_retry_count` 保留作为最终兜底。
+        instrument = data.get('InstrumentID', '') or getattr(ds, 'symbol', '') or ''
+        direction = data.get('Direction', '') or ''
+        self._register_pending_inherit(instrument, direction, of0, retry_count + 1)
+        
+        if data.get('Direction') == '0':
+            if of0 == '0':
+                ds.buy(volume=volume_left, reason=f"超时重发(#{retry_count + 1})", offset_ticks=retry_offset)
+            else:
+                ds.buycover(volume=volume_left, reason=f"超时重发(#{retry_count + 1})", offset_ticks=retry_offset)
+        else:
+            if of0 == '0':
+                ds.sellshort(volume=volume_left, reason=f"超时重发(#{retry_count + 1})", offset_ticks=retry_offset)
+            else:
+                ds.sell(volume=volume_left, reason=f"超时重发(#{retry_count + 1})", offset_ticks=retry_offset)
+        
+        # 兜底：保留旧字段以兼容自定义/外部路径；_on_order 命中三元组时会主动清掉它防止双重继承
+        ds._next_order_retry_count = retry_count + 1
+    
     def _on_order(self, data: Dict):
         """报单回调"""
         # 状态映射
@@ -2518,12 +2982,18 @@ class LiveTradingAdapter:
                         if order_sys_id not in ds.pending_orders:
                             data['_local_insert_time'] = time.time()
                             
-                            # 【智能追单】检查是否有待继承的重试次数
-                            if hasattr(ds, '_next_order_retry_count') and ds._next_order_retry_count > 0:
+                            # 【智能追单 · B4 修复】优先按 (instrument, direction, offset) 三元组队列匹配，
+                            # 跨订单并发时不会把无关新单误认为重发的"接班人"。
+                            consumed = self._consume_pending_inherit(ds, data, order_sys_id)
+                            if consumed:
+                                # 命中三元组：清掉旧兜底标志位，避免双重继承
+                                if hasattr(ds, '_next_order_retry_count'):
+                                    ds._next_order_retry_count = 0
+                            elif hasattr(ds, '_next_order_retry_count') and ds._next_order_retry_count > 0:
+                                # 兜底：旧路径（保留兼容性，仅在三元组队列未命中时启用）
                                 ds.orders_to_resend[order_sys_id] = ds._next_order_retry_count
-                                # 使用后清除，防止污染其他订单
                                 ds._next_order_retry_count = 0
-                                print(f"[智能追单] 订单 {order_sys_id} 已继承重试次数: {ds.orders_to_resend[order_sys_id]}")
+                                print(f"[智能追单] 订单 {order_sys_id} 已继承重试次数: {ds.orders_to_resend[order_sys_id]} (兜底)")
                         else:
                             # 保留原有的时间戳
                             data['_local_insert_time'] = ds.pending_orders[order_sys_id].get('_local_insert_time', time.time())
@@ -2578,46 +3048,16 @@ class LiveTradingAdapter:
         print(f"\n🚫 [撤单成功] {time_str} {symbol} {direction}{offset} "
               f"价格={price:.2f} 数量={volume_original} 已成交={volume_traded} 订单号={order_sys_id}")
         
-        # 智能追单逻辑（主力或旧合约 InstrumentID 与数据源匹配）
-        for ds in self.multi_data_source.data_sources:
-            if _live_ds_matches_instrument_id(ds, symbol) and order_sys_id in ds.orders_to_resend:
-                retry_count = ds.orders_to_resend.pop(order_sys_id)
-                
-                if retry_count < ds.retry_limit:
-                    print(f"[智能追单] 触发重发: 剩余重试次数 {ds.retry_limit - retry_count - 1}")
-                    
-                    # 计算剩余未成交数量
-                    volume_left = volume_original - volume_traded
-                    if volume_left > 0:
-                        # 使用更激进的偏移量
-                        retry_offset = ds.retry_offset_ticks
-                        
-                        # 判断买卖方向调用对应函数
-                        if data.get('Direction') == '0': # 买
-                            # 判断是买开还是买平
-                            if offset_flag == '0': # 买开
-                                # 记录新的重发订单，重试次数+1
-                                # 注意：这里不能直接用buy返回的OrderSysID，因为是异步的
-                                # 我们通过在ds中设置临时标记，让_on_order回调知道这个新订单是重发的
-                                ds.buy(volume=volume_left, reason=f"超时重发(#{retry_count+1})", offset_ticks=retry_offset)
-                                
-                                # 将重试次数传给下一个订单
-                                # 由于此时不知道新订单号，我们只能等新订单生成时处理
-                                # 这里简化处理：我们假设重发总能成功提交，实际逻辑可能更复杂
-                            else: # 买平 (平空)
-                                ds.buycover(volume=volume_left, reason=f"超时重发(#{retry_count+1})", offset_ticks=retry_offset)
-                        else: # 卖
-                            # 判断是卖开还是卖平
-                            if offset_flag == '0': # 卖开 (做空)
-                                ds.sellshort(volume=volume_left, reason=f"超时重发(#{retry_count+1})", offset_ticks=retry_offset)
-                            else: # 卖平 (平多)
-                                ds.sell(volume=volume_left, reason=f"超时重发(#{retry_count+1})", offset_ticks=retry_offset)
-                        
-                        # 【关键】设置一个临时属性，告诉_on_order下一个生成的订单需要继承重试次数
-                        ds._next_order_retry_count = retry_count + 1
-                else:
-                    print(f"[智能追单] 达到最大重试次数 ({ds.retry_limit})，停止追单")
-                break
+        # 智能追单：优先用超时前登记的 plan（支持 OrderSysID 为空时用 FrontID+SessionID+OrderRef 匹配）
+        plan = self.pop_algo_timeout_resend_plan(data)
+        if plan:
+            self._execute_algo_resend_after_cancel(plan['ds'], plan['retry_count'], data)
+        else:
+            for ds in self.multi_data_source.data_sources:
+                if _live_ds_matches_instrument_id(ds, symbol) and order_sys_id and order_sys_id in ds.orders_to_resend:
+                    retry_count = ds.orders_to_resend.pop(order_sys_id)
+                    self._execute_algo_resend_after_cancel(ds, retry_count, data)
+                    break
 
         # 调用用户自定义的撤单回调
         if self.on_cancel_callback:

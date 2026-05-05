@@ -18,7 +18,6 @@ from ssquant.api.strategy_api import StrategyAPI
 from ssquant.backtest.unified_runner import UnifiedStrategyRunner, RunMode
 from ssquant.config.trading_config import get_config
 
-
 # ========== 期权配置 ==========
 CALL_OPTION = 'au2602C650'      # 看涨期权
 PUT_OPTION = 'au2602P640'       # 看跌期权
@@ -57,20 +56,18 @@ g_prices = {'call': 0, 'put': 0, 'underlying': 0}
 # g_stats: 交易统计
 g_stats = {'trades': 0, 'orders': 0}
 
-
 def on_trade(data):
     """成交回调"""
     global g_waiting, g_stats
     g_waiting = False
     g_stats['trades'] += 1
-    
+
     inst = data['InstrumentID']
     d = '买' if data['Direction'] == '0' else '卖'
     o = '开' if data['OffsetFlag'] == '0' else '平'
-    
+
     opt_type = "看涨" if 'C' in inst else "看跌" if 'P' in inst else "期货"
     print(f"✅ [成交] {opt_type}期权 {inst} {d}{o} 价格:{data['Price']:.2f} 数量:{data['Volume']}")
-
 
 def on_order(data):
     """报单回调"""
@@ -81,13 +78,11 @@ def on_order(data):
         g_stats['orders'] += 1
     print(f"📋 [报单] {data['InstrumentID']} {d} {status.get(data['OrderStatus'], '?')}")
 
-
 def on_order_error(data):
     """报单错误"""
     global g_waiting
     g_waiting = False
     print(f"❌ [错误] {data['ErrorID']}: {data['ErrorMsg']}")
-
 
 def on_position(data):
     """持仓回调"""
@@ -96,7 +91,6 @@ def on_position(data):
     direction = {'2': '多', '3': '空'}.get(data.get('PosiDirection'), '')
     if pos > 0:
         print(f"📊 [持仓] {inst} {direction} {pos}手")
-
 
 def initialize(api: StrategyAPI):
     """初始化"""
@@ -114,58 +108,57 @@ def initialize(api: StrategyAPI):
     print(f"  4. 卖出看跌期权 → 平仓")
     print(f"{'='*60}\n")
 
-
 def strategy(api: StrategyAPI):
     """期权交易策略"""
     global g_phase, g_waiting, g_target, g_prices
-    
+
     tick = api.get_tick()
     if tick is None:
         return
-    
+
     inst = tick.get('InstrumentID', '')
     price = tick.get('LastPrice', 0)
-    
+
     if inst == CALL_OPTION:
         g_prices['call'] = price
     elif inst == PUT_OPTION:
         g_prices['put'] = price
     elif inst == UNDERLYING:
         g_prices['underlying'] = price
-    
+
     if g_waiting:
         return
-    
+
     pos = api.get_pos()
-    
+
     if g_phase == 'wait_price':
         if g_prices['call'] > 0 and g_prices['put'] > 0:
             print(f"\n>>> 价格就绪，开始期权交易测试")
             g_phase = 'buy_call'
             time.sleep(1)
         return
-    
+
     if g_phase == 'buy_call':
         print(f"\n{'='*40}\n[测试1] 买入看涨期权\n{'='*40}")
         api.buy(volume=TRADE_VOLUME, order_type='market', reason='买入看涨期权')
         g_phase, g_target, g_waiting = 'close_call', CALL_OPTION, True
         time.sleep(INTERVAL)
         return
-    
+
     if g_phase == 'close_call' and pos > 0:
         print(f">>> 平仓看涨期权多头")
         api.sell(order_type='market', reason='平仓看涨期权')
         g_phase, g_waiting = 'buy_put', True
         time.sleep(INTERVAL)
         return
-    
+
     if g_phase == 'buy_put' and pos == 0:
         print(f"\n{'='*40}\n[测试2] 买入看跌期权\n{'='*40}")
         api.buy(volume=TRADE_VOLUME, order_type='market', reason='买入看跌期权', index=1)
         g_phase, g_target, g_waiting = 'close_put', PUT_OPTION, True
         time.sleep(INTERVAL)
         return
-    
+
     if g_phase == 'close_put':
         put_pos = api.get_pos(index=1)
         if put_pos > 0:
@@ -174,7 +167,7 @@ def strategy(api: StrategyAPI):
             g_phase, g_waiting = 'sell_call', True
             time.sleep(INTERVAL)
         return
-    
+
     if g_phase == 'sell_call':
         call_pos = api.get_pos(index=0)
         if call_pos == 0:
@@ -188,7 +181,7 @@ def strategy(api: StrategyAPI):
             g_phase, g_target, g_waiting = 'cover_call', CALL_OPTION, True
             time.sleep(INTERVAL)
         return
-    
+
     if g_phase == 'cover_call':
         call_pos = api.get_pos(index=0)
         if call_pos < 0:
@@ -197,7 +190,7 @@ def strategy(api: StrategyAPI):
             g_phase, g_waiting = 'sell_put', True
             time.sleep(INTERVAL)
         return
-    
+
     if g_phase == 'sell_put':
         call_pos = api.get_pos(index=0)
         if call_pos == 0:
@@ -211,7 +204,7 @@ def strategy(api: StrategyAPI):
             g_phase, g_target, g_waiting = 'cover_put', PUT_OPTION, True
             time.sleep(INTERVAL)
         return
-    
+
     if g_phase == 'cover_put':
         put_pos = api.get_pos(index=1)
         if put_pos < 0:
@@ -220,7 +213,7 @@ def strategy(api: StrategyAPI):
             g_phase, g_waiting = 'done', True
             time.sleep(INTERVAL)
         return
-    
+
     if g_phase == 'done':
         print(f"\n{'='*60}")
         print(f"期权交易测试完成 - {datetime.now().strftime('%H:%M:%S')}")
@@ -229,91 +222,75 @@ def strategy(api: StrategyAPI):
         print(f"\n按 Ctrl+C 退出\n")
         g_phase = 'finished'
 
-
 if __name__ == "__main__":
-    
-    # ==================== 运行模式选择 ====================
-    RUN_MODE = RunMode.SIMNOW      # SIMNOW 或 REAL_TRADING
-    
+
+    # 运行模式: BACKTEST(回测) / SIMNOW(模拟盘) / REAL_TRADING(实盘交易)
+    RUN_MODE = RunMode.SIMNOW
+
     # ==================== 配置 ====================
     if RUN_MODE == RunMode.SIMNOW:
         # SIMNOW模拟盘配置
         config = get_config(RUN_MODE,
-            # -------- 账户配置 --------
-            account='simnow_default',      # 账户名（在trading_config.py的ACCOUNTS中定义）
+            account='simnow_default', # 账户名（必须在 trading_config.py 的 ACCOUNTS 中定义）
+            kline_source='local',              # K线源: 'local'(CTP本地聚合) 或 'data_server'(远程推送,需账号)
             server_name='电信1',           # SIMNOW服务器: 电信1/电信2/移动/TEST(盘后测试)
-            
-            # -------- 多数据源配置 --------
-            # 每个数据源对应一个index: 0=看涨期权, 1=看跌期权, 2=标的期货
+
             data_sources=[
                 {'symbol': CALL_OPTION, 'kline_period': 'tick', 'price_tick': 0.02},  # index=0
                 {'symbol': PUT_OPTION, 'kline_period': 'tick', 'price_tick': 0.02},   # index=1
                 {'symbol': UNDERLYING, 'kline_period': 'tick', 'price_tick': 0.02},   # index=2
             ],
-            
-            # -------- 交易参数 --------
-            order_offset_ticks=2,         # 期权需要正向偏移确保委托价>0
-            
-            # -------- 智能算法交易配置 --------
-            # 功能：超时未成交自动撤单 → 按超价重新下单，最多重试N次
-            algo_trading=True,            # 启用算法交易
+
+            order_offset_ticks=2,   # 委托超价跳数（+10=对手价+10跳，确保成交）
+
+            algo_trading=True,      # 是否启用智能算法交易（超时重试/撤单重发）
             order_timeout=10,             # 订单超时时间(秒)
-            retry_limit=3,                # 最大重试次数
-            retry_offset_ticks=2,         # 重试时的超价跳数
-            
-            # -------- 回调模式 --------
-            enable_tick_callback=True,     # 期权策略需要TICK驱动
-            preload_history=False,         # 是否预加载历史K线
-            
-            # -------- 数据保存 --------
-            save_kline_csv=False,          # 保存K线到CSV文件
-            save_kline_db=False,           # 保存K线到数据库
-            save_tick_csv=False,           # 保存TICK到CSV文件
-            save_tick_db=False,            # 保存TICK到数据库
+            retry_limit=3,          # 订单失败最大重试次数
+            retry_offset_ticks=2,   # 重试时额外超价跳数
+
+            enable_tick_callback=True, # 是否启用逐Tick回调（高CPU占用）
+            preload_history=False,  # 是否预加载历史K线（策略初始化前填充）
+
+            save_kline_csv=False,   # 是否保存K线到CSV文件
+            save_kline_db=False,    # 是否保存K线到SQLite数据库
+            save_tick_csv=False,    # 是否保存Tick到CSV文件
+            save_tick_db=False,     # 是否保存Tick到SQLite数据库
         )
-    
+
     elif RUN_MODE == RunMode.REAL_TRADING:
         # 实盘CTP配置
         config = get_config(RUN_MODE,
-            # -------- 账户配置 --------
-            account='real_default',        # 账户名（在trading_config.py的ACCOUNTS中定义）
-            # 实盘账户需要配置: broker_id, investor_id, password,
-            #                  md_server, td_server, app_id, auth_code
-            
-            # -------- 多数据源配置 --------
+            account='real_default', # 实盘账户名（必须在 trading_config.py 的 ACCOUNTS 中填写完整信息）
+            kline_source='data_server',              # K线源: 'local'(CTP本地聚合) 或 'data_server'(远程推送,需账号)
+
             data_sources=[
                 {'symbol': CALL_OPTION, 'kline_period': '1m', 'price_tick': 0.02},  # index=0
                 {'symbol': PUT_OPTION, 'kline_period': '1m', 'price_tick': 0.02},   # index=1
                 {'symbol': UNDERLYING, 'kline_period': '1m', 'price_tick': 0.02},   # index=2
             ],
-            
-            # -------- 交易参数 --------
-            order_offset_ticks=10,         # 期权需要正向偏移确保委托价>0
-            
-            # -------- 智能算法交易配置 --------
-            # 功能：超时未成交自动撤单 → 按超价重新下单，最多重试N次
-            algo_trading=True,            # 启用算法交易
+
+            order_offset_ticks=10,  # 委托偏移: 负值=价内挂单（低滑点），正值=超价（高成交率）
+
+            algo_trading=True,      # 智能算法交易
             order_timeout=10,             # 订单超时时间(秒)
-            retry_limit=3,                # 最大重试次数
-            retry_offset_ticks=5,         # 重试时的超价跳数
-            
-            # -------- 回调模式 --------
-            enable_tick_callback=True,     # 期权策略需要TICK驱动
-            preload_history=False,         # 预加载历史K线
-            
-            # -------- 数据保存 --------
-            save_kline_csv=False,          # 保存K线到CSV
-            save_kline_db=False,           # 保存K线到数据库
-            save_tick_csv=False,           # 保存TICK到CSV
-            save_tick_db=False,            # 保存TICK到数据库
+            retry_limit=3,          # 最大重试次数
+            retry_offset_ticks=5,   # 重试超价跳数
+
+            enable_tick_callback=True, # Tick回调
+            preload_history=False,  # 预加载历史K线
+
+            save_kline_csv=False,   # 保存K线CSV
+            save_kline_db=False,    # 保存K线DB
+            save_tick_csv=False,    # 保存Tick CSV
+            save_tick_db=False,     # 保存Tick DB
         )
-    
+
     # ==================== 运行 ====================
     print(f"\n运行模式: {RUN_MODE.value}")
-    
+
     runner = UnifiedStrategyRunner(mode=RUN_MODE)
     runner.set_config(config)
-    
+
     try:
         runner.run(
             strategy=strategy,

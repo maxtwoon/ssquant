@@ -2,7 +2,7 @@
 
 支持三种运行模式:
 1. 历史数据回测
-2. SIMNOW模拟交易  
+2. SIMNOW模拟交易
 3. 实盘CTP交易
 
 展示如何在一个策略中:
@@ -31,7 +31,7 @@ import numpy as np
 def initialize(api: StrategyAPI):
     """
     策略初始化函数
-    
+
     Args:
         api: 策略API对象
     """
@@ -48,50 +48,50 @@ def is_crossover(fast_ma, slow_ma, idx):
     """判断上穿"""
     if idx < 1:
         return False
-    return (fast_ma.iloc[idx-1] <= slow_ma.iloc[idx-1] and 
+    return (fast_ma.iloc[idx-1] <= slow_ma.iloc[idx-1] and
             fast_ma.iloc[idx] > slow_ma.iloc[idx])
 
 def is_crossunder(fast_ma, slow_ma, idx):
     """判断下穿"""
     if idx < 1:
         return False
-    return (fast_ma.iloc[idx-1] >= slow_ma.iloc[idx-1] and 
+    return (fast_ma.iloc[idx-1] >= slow_ma.iloc[idx-1] and
             fast_ma.iloc[idx] < slow_ma.iloc[idx])
 
 def multi_source_strategy(api: StrategyAPI):
     """
     多数据源策略示例（无指标API版）
-    
+
     使用多个数据源：
     - 数据源0: j888 5分钟K线
     - 数据源1: j888 15分钟K线
     - 数据源2: jm888 5分钟K线
     - 数据源3: jm888 15分钟K线
-    
+
     策略逻辑：
     1. 每个数据源都单独交易，根据自身的均线交叉产生信号
     2. 5分钟和15分钟周期各自独立交易，不互相影响
     3. 当短期均线上穿长期均线时，开多仓
     4. 当短期均线下穿长期均线时，开空仓
-    
+
     参数:
         fast_ma: 短期均线周期，默认5
         slow_ma: 长期均线周期，默认20
-    
+
     注意：本版本使用自定义函数计算指标，不依赖API提供的指标计算功能
     """
     # 获取参数，如果未提供则使用默认值
     fast_ma = api.get_param('fast_ma', 5)  # 短期均线周期
     slow_ma = api.get_param('slow_ma', 20) # 长期均线周期
-    
+
     # 确保至少有4个数据源
     if not api.require_data_sources(4):
         return
-    
+
     # 获取当前索引和日期时间
     bar_idx = api.get_idx(0)
     bar_datetime = api.get_datetime(0)
-    
+
     # 打印各数据源的信息
     if bar_idx % 1 == 0:  # 每5根K线打印一次信息
         api.log(f"当前Bar索引: {bar_idx}, 日期时间: {bar_datetime}")
@@ -100,25 +100,25 @@ def multi_source_strategy(api: StrategyAPI):
             ds = api.get_data_source(i)
             if ds:
                 api.log(f"数据源{i}: {ds.symbol}_{ds.kline_period}, 当前价格: {ds.current_price}, 持仓: {ds.current_pos}")
-    
+
     # 获取K线数据
     j888_5m_klines = api.get_klines(0)    # j888 5分钟K线
     j888_15m_klines = api.get_klines(1)   # j888 15分钟K线
     jm888_5m_klines = api.get_klines(2)   # jm888 5分钟K线
     jm888_15m_klines = api.get_klines(3)  # jm888 15分钟K线
-    
+
     # 确保有足够的数据
     min_data_len = max(fast_ma, slow_ma) + 5  # 需要的最小数据长度
-    if (len(j888_5m_klines) < min_data_len or len(j888_15m_klines) < min_data_len or 
+    if (len(j888_5m_klines) < min_data_len or len(j888_15m_klines) < min_data_len or
         len(jm888_5m_klines) < min_data_len or len(jm888_15m_klines) < min_data_len):
         return
-    
+
     # 获取收盘价
     j888_5m_close = j888_5m_klines['close']
     j888_15m_close = j888_15m_klines['close']
     jm888_5m_close = jm888_5m_klines['close']
     jm888_15m_close = jm888_15m_klines['close']
-    
+
     # 计算均线 - 使用自定义函数和参数化的均线周期
     j888_5m_ma_fast = calculate_ma(j888_5m_close, fast_ma)
     j888_5m_ma_slow = calculate_ma(j888_5m_close, slow_ma)
@@ -128,28 +128,28 @@ def multi_source_strategy(api: StrategyAPI):
     jm888_5m_ma_slow = calculate_ma(jm888_5m_close, slow_ma)
     jm888_15m_ma_fast = calculate_ma(jm888_15m_close, fast_ma)
     jm888_15m_ma_slow = calculate_ma(jm888_15m_close, slow_ma)
-    
+
     # 如果数据不足，直接返回（使用相对索引）
     if (pd.isna(j888_5m_ma_slow.iloc[-1]) or pd.isna(j888_15m_ma_slow.iloc[-1]) or
         pd.isna(jm888_5m_ma_slow.iloc[-1]) or pd.isna(jm888_15m_ma_slow.iloc[-1])):
         return
-    
+
     # 获取当前持仓
     j888_5m_pos = api.get_pos(0)   # 数据源0持仓
     j888_15m_pos = api.get_pos(1)  # 数据源1持仓
     jm888_5m_pos = api.get_pos(2)  # 数据源2持仓
     jm888_15m_pos = api.get_pos(3) # 数据源3持仓
-    
+
     # 获取当前价格（使用相对索引）
     j888_5m_price = j888_5m_close.iloc[-1]
     jm888_5m_price = jm888_5m_close.iloc[-1]
     j888_15m_price = j888_15m_close.iloc[-1]
     jm888_15m_price = jm888_15m_close.iloc[-1]
-    
+
     # 计算交易信号 - 使用自定义函数和相对索引
     if len(j888_5m_ma_fast) < 2:
         return
-        
+
     # 判断均线交叉（使用相对索引-1表示当前，-2表示前一个）
     j888_5m_long_signal = (j888_5m_ma_fast.iloc[-2] <= j888_5m_ma_slow.iloc[-2] and j888_5m_ma_fast.iloc[-1] > j888_5m_ma_slow.iloc[-1])
     j888_5m_short_signal = (j888_5m_ma_fast.iloc[-2] >= j888_5m_ma_slow.iloc[-2] and j888_5m_ma_fast.iloc[-1] < j888_5m_ma_slow.iloc[-1])
@@ -159,29 +159,29 @@ def multi_source_strategy(api: StrategyAPI):
     jm888_5m_short_signal = (jm888_5m_ma_fast.iloc[-2] >= jm888_5m_ma_slow.iloc[-2] and jm888_5m_ma_fast.iloc[-1] < jm888_5m_ma_slow.iloc[-1])
     jm888_15m_long_signal = (jm888_15m_ma_fast.iloc[-2] <= jm888_15m_ma_slow.iloc[-2] and jm888_15m_ma_fast.iloc[-1] > jm888_15m_ma_slow.iloc[-1])
     jm888_15m_short_signal = (jm888_15m_ma_fast.iloc[-2] >= jm888_15m_ma_slow.iloc[-2] and jm888_15m_ma_fast.iloc[-1] < jm888_15m_ma_slow.iloc[-1])
-    
+
     # 交易单位
     unit = 1
-    
+
     # 数据源0: j888 5分钟K线交易逻辑
     if j888_5m_pos > 0:  # 当前持多仓
         if j888_5m_short_signal:  # 平多信号
             api.log(f"J888 5分钟K线短期均线下穿长期均线，平多仓，价格：{j888_5m_price:.2f}，将在下一根K线开盘价执行")
             api.sell(volume=unit, order_type='next_bar_open', index=0)
-            
+
             # 同时开空
             api.log(f"J888 5分钟K线短期均线下穿长期均线，开空仓，价格：{j888_5m_price:.2f}，将在下一根K线开盘价执行")
             api.sellshort(volume=unit, order_type='next_bar_open', index=0)
-            
+
     elif j888_5m_pos < 0:  # 当前持空仓
         if j888_5m_long_signal:  # 平空信号
             api.log(f"J888 5分钟K线短期均线上穿长期均线，平空仓，价格：{j888_5m_price:.2f}，将在下一根K线开盘价执行")
             api.buycover(volume=unit, order_type='next_bar_open', index=0)
-            
+
             # 同时开多
             api.log(f"J888 5分钟K线短期均线上穿长期均线，开多仓，价格：{j888_5m_price:.2f}，将在下一根K线开盘价执行")
             api.buy(volume=unit, order_type='next_bar_open', index=0)
-            
+
     else:  # 当前无持仓
         if j888_5m_long_signal:  # 开多信号
             api.log(f"J888 5分钟K线短期均线上穿长期均线，开多仓，价格：{j888_5m_price:.2f}，将在下一根K线开盘价执行")
@@ -189,26 +189,26 @@ def multi_source_strategy(api: StrategyAPI):
         elif j888_5m_short_signal:  # 开空信号
             api.log(f"J888 5分钟K线短期均线下穿长期均线，开空仓，价格：{j888_5m_price:.2f}，将在下一根K线开盘价执行")
             api.sellshort(volume=unit, order_type='next_bar_open', index=0)
-    
+
     # 数据源1: j888 15分钟K线交易逻辑
     if j888_15m_pos > 0:  # 当前持多仓
         if j888_15m_short_signal:  # 平多信号
             api.log(f"J888 15分钟K线短期均线下穿长期均线，平多仓，价格：{j888_15m_price:.2f}，将在下一根K线开盘价执行")
             api.sell(volume=unit, order_type='next_bar_open', index=1)
-            
+
             # 同时开空
             api.log(f"J888 15分钟K线短期均线下穿长期均线，开空仓，价格：{j888_15m_price:.2f}，将在下一根K线开盘价执行")
             api.sellshort(volume=unit, order_type='next_bar_open', index=1)
-            
+
     elif j888_15m_pos < 0:  # 当前持空仓
         if j888_15m_long_signal:  # 平空信号
             api.log(f"J888 15分钟K线短期均线上穿长期均线，平空仓，价格：{j888_15m_price:.2f}，将在下一根K线开盘价执行")
             api.buycover(volume=unit, order_type='next_bar_open', index=1)
-            
+
             # 同时开多
             api.log(f"J888 15分钟K线短期均线上穿长期均线，开多仓，价格：{j888_15m_price:.2f}，将在下一根K线开盘价执行")
             api.buy(volume=unit, order_type='next_bar_open', index=1)
-            
+
     else:  # 当前无持仓
         if j888_15m_long_signal:  # 开多信号
             api.log(f"J888 15分钟K线短期均线上穿长期均线，开多仓，价格：{j888_15m_price:.2f}，将在下一根K线开盘价执行")
@@ -216,26 +216,26 @@ def multi_source_strategy(api: StrategyAPI):
         elif j888_15m_short_signal:  # 开空信号
             api.log(f"J888 15分钟K线短期均线下穿长期均线，开空仓，价格：{j888_15m_price:.2f}，将在下一根K线开盘价执行")
             api.sellshort(volume=unit, order_type='next_bar_open', index=1)
-    
+
     # 数据源2: jm888 5分钟K线交易逻辑
     if jm888_5m_pos > 0:  # 当前持多仓
         if jm888_5m_short_signal:  # 平多信号
             api.log(f"JM888 5分钟K线短期均线下穿长期均线，平多仓，价格：{jm888_5m_price:.2f}，将在下一根K线开盘价执行")
             api.sell(volume=unit, order_type='next_bar_open', index=2)
-            
+
             # 同时开空
             api.log(f"JM888 5分钟K线短期均线下穿长期均线，开空仓，价格：{jm888_5m_price:.2f}，将在下一根K线开盘价执行")
             api.sellshort(volume=unit, order_type='next_bar_open', index=2)
-            
+
     elif jm888_5m_pos < 0:  # 当前持空仓
         if jm888_5m_long_signal:  # 平空信号
             api.log(f"JM888 5分钟K线短期均线上穿长期均线，平空仓，价格：{jm888_5m_price:.2f}，将在下一根K线开盘价执行")
             api.buycover(volume=unit, order_type='next_bar_open', index=2)
-            
+
             # 同时开多
             api.log(f"JM888 5分钟K线短期均线上穿长期均线，开多仓，价格：{jm888_5m_price:.2f}，将在下一根K线开盘价执行")
             api.buy(volume=unit, order_type='next_bar_open', index=2)
-            
+
     else:  # 当前无持仓
         if jm888_5m_long_signal:  # 开多信号
             api.log(f"JM888 5分钟K线短期均线上穿长期均线，开多仓，价格：{jm888_5m_price:.2f}，将在下一根K线开盘价执行")
@@ -243,26 +243,26 @@ def multi_source_strategy(api: StrategyAPI):
         elif jm888_5m_short_signal:  # 开空信号
             api.log(f"JM888 5分钟K线短期均线下穿长期均线，开空仓，价格：{jm888_5m_price:.2f}，将在下一根K线开盘价执行")
             api.sellshort(volume=unit, order_type='next_bar_open', index=2)
-    
+
     # 数据源3: jm888 15分钟K线交易逻辑
     if jm888_15m_pos > 0:  # 当前持多仓
         if jm888_15m_short_signal:  # 平多信号
             api.log(f"JM888 15分钟K线短期均线下穿长期均线，平多仓，价格：{jm888_15m_price:.2f}，将在下一根K线开盘价执行")
             api.sell(volume=unit, order_type='next_bar_open', index=3)
-            
+
             # 同时开空
             api.log(f"JM888 15分钟K线短期均线下穿长期均线，开空仓，价格：{jm888_15m_price:.2f}，将在下一根K线开盘价执行")
             api.sellshort(volume=unit, order_type='next_bar_open', index=3)
-            
+
     elif jm888_15m_pos < 0:  # 当前持空仓
         if jm888_15m_long_signal:  # 平空信号
             api.log(f"JM888 15分钟K线短期均线上穿长期均线，平空仓，价格：{jm888_15m_price:.2f}，将在下一根K线开盘价执行")
             api.buycover(volume=unit, order_type='next_bar_open', index=3)
-            
+
             # 同时开多
             api.log(f"JM888 15分钟K线短期均线上穿长期均线，开多仓，价格：{jm888_15m_price:.2f}，将在下一根K线开盘价执行")
             api.buy(volume=unit, order_type='next_bar_open', index=3)
-            
+
     else:  # 当前无持仓
         if jm888_15m_long_signal:  # 开多信号
             api.log(f"JM888 15分钟K线短期均线上穿长期均线，开多仓，价格：{jm888_15m_price:.2f}，将在下一根K线开盘价执行")
@@ -273,284 +273,241 @@ def multi_source_strategy(api: StrategyAPI):
 
 if __name__ == "__main__":
     from ssquant.config.trading_config import get_config
-    
 
     ###注意，这是4个独立运行的策略案例，不要对齐数据，否则会出错。
 
-    # ========== 选择运行模式 ==========
+    # 运行模式: BACKTEST(回测) / SIMNOW(模拟盘) / REAL_TRADING(实盘交易)
     RUN_MODE = RunMode.BACKTEST
-    
+
     # ========== 策略参数 ==========
     strategy_params = {
         'fast_ma': 5,
         'slow_ma': 20,
     }
-    
+
     # ========== 获取基础配置 ==========
     if RUN_MODE == RunMode.BACKTEST:
         # ==================== 回测配置 (多品种多周期 - 2品种×2周期=4数据源) ====================
         config = get_config(RUN_MODE,
-            # -------- 基础配置 --------
-            start_date='2025-12-01',          # 回测开始日期
-            end_date='2026-4-31',            # 回测结束日期
+            start_date='2025-12-01', # 回测开始日期
+            end_date='2026-4-31',   # 回测结束日期
+            data_source_mode='data_server', # 'data_server'(远程,需API账号) 或 'local'(本地SQLite,无需账号) 注意:TICK回测必须用'local'
             initial_capital=100000,           # 初始资金 (元)
-            # commission=自动,                # 手续费率（自动从远程获取）
-            # margin_rate=自动,               # 保证金率（自动从远程获取）
-            
-            # -------- 数据对齐配置 (独立策略不需要对齐) --------
-            align_data=False,                  # 多个独立策略不需要对齐数据
-            fill_method='ffill',              # 缺失值填充方法: 'ffill'向前填充, 'bfill'向后填充
-            
-            # -------- 数据窗口配置 --------
+
+            align_data=False,       # 是否对齐多数据源时间轴
+            fill_method='ffill',    # 对齐缺失值填充方式: ffill(前值填充) / bfill(后值填充)
+
             lookback_bars=500,                # K线回溯窗口 (0=不限制，策略get_klines返回的最大条数)
-            
-            # -------- 多品种 data_sources --------
-            # 每个品种可选设置资金分配（不填则所有品种平分 initial_capital）：
-            #   'capital_ratio': 6   — 按比例分配，如 A=6, B=4 则 A 占 60%, B 占 40%
-            #   'initial_capital': 60000  — 直接指定金额，如 A=60000, B=40000
+
             data_sources=[
                 {   # 数据源0: 焦炭 1分钟
                     'symbol': 'j888',         # 主力合约（自动映射）
                     'kline_period': '1m',     # K线周期
-                    'adjust_type': '2',       # 复权: '0'不复权  '1'后复权  '2'前复权
-                    # 'price_tick': 自动,     # 最小变动价位（自动获取）
-                    # 'contract_multiplier': 自动,  # 合约乘数（自动获取）
+                    'adjust_type': '1',       # 复权: '0'不复权, '1'后复权, '2'前复权
                     'slippage_ticks': 1,      # 滑点跳数
                     'capital_ratio': 8,       # 资金权重: 4/10=40%
                 },
                 {   # 数据源1: 焦炭 5分钟
                     'symbol': 'j888',         # 同品种不同周期
                     'kline_period': '5m',     # K线周期
-                    'adjust_type': '2',       # 复权: '0'不复权  '1'后复权  '2'前复权
-                    # 'price_tick': 自动,     # 最小变动价位（自动获取）
-                    # 'contract_multiplier': 自动,  # 合约乘数（自动获取）
+                    'adjust_type': '1',       # 复权: '0'不复权, '1'后复权, '2'前复权
                     'slippage_ticks': 1,      # 滑点跳数
                     'capital_ratio': 1,       # 资金权重: 1/10=10%
                 },
                 {   # 数据源2: 焦煤 1分钟
                     'symbol': 'jm888',        # 主力合约（自动映射）
                     'kline_period': '1m',     # K线周期
-                    'adjust_type': '2',       # 复权: '0'不复权  '1'后复权  '2'前复权
-                    # 'price_tick': 自动,     # 最小变动价位（自动获取）
-                    # 'contract_multiplier': 自动,  # 合约乘数（自动获取）
+                    'adjust_type': '1',       # 复权: '0'不复权, '1'后复权, '2'前复权
                     'slippage_ticks': 1,      # 滑点跳数
                     'capital_ratio': 3,       # 资金权重: 3/10=30%
                 },
                 {   # 数据源3: 焦煤 5分钟
                     'symbol': 'jm888',        # 同品种不同周期
                     'kline_period': '5m',     # K线周期
-                    'adjust_type': '2',       # 复权: '0'不复权  '1'后复权  '2'前复权
-                    # 'price_tick': 自动,     # 最小变动价位（自动获取）
-                    # 'contract_multiplier': 自动,  # 合约乘数（自动获取）
+                    'adjust_type': '1',       # 复权: '0'不复权, '1'后复权, '2'前复权
                     'slippage_ticks': 1,      # 滑点跳数
                     'capital_ratio': 2,       # 资金权重: 2/10=20%
                 },
-            ]
+            ],
         )
-    
+
     elif RUN_MODE == RunMode.SIMNOW:
         # ==================== SIMNOW模拟配置 (多品种多周期) ====================
         config = get_config(RUN_MODE,
-            # -------- 账户配置 --------
-            account='simnow_default',         # 账户名称
+            account='simnow_default', # 账户名（必须在 trading_config.py 的 ACCOUNTS 中定义）
+            kline_source='local',              # K线源: 'local'(CTP本地聚合) 或 'data_server'(远程推送,需账号)
             server_name='电信1',              # 服务器: 电信1/电信2/移动/TEST(盘后测试)
-            
-            # -------- K线来源 --------
-            # 默认 'local'：本地CTP Tick合成K线
-            # 'data_server'：远程推送K线（需在 trading_config.py 配置账号）
-            kline_source='local',
-            
-            # -------- 多品种 data_sources --------
+
             data_sources=[
                 {   # 数据源0: 焦炭 1分钟
                     'symbol': 'j888',             # 主力合约（自动映射）
-                    'kline_period': '60m',         # K线周期
-                    # 'price_tick': 0.5,          # 最小变动价位（自动获取，手动指定请取消注释）
+                    'kline_period': '1m',         # K线周期
                     'order_offset_ticks': 10,     # 下单偏移跳数 (挂单距离)
-                    
+
                     'algo_trading': False,        # 智能交易开关
                     'order_timeout': 10,          # 超时时间
                     'retry_limit': 3,             # 重试次数
                     'retry_offset_ticks': 5,      # 重试偏移
-                    
+
                     'auto_roll_enabled': False,   # 自动移仓开关
                     'auto_roll_reopen': True,     # 移仓后自动重新开仓
-                    
+
                     'preload_history': True,      # 是否预加载历史数据
                     'history_lookback_bars': 2000, # 预加载K线数量
-                    'adjust_type': '1',           # 复权: '0'不复权  '1'后复权  '2'前复权
+                    'adjust_type': '1',           # 复权: '0'不复权, '1'后复权, '2'前复权
                 },
                 {   # 数据源1: 焦炭 5分钟
                     'symbol': 'j888',             # 同品种不同周期
-                    'kline_period': '60m',         # K线周期
-                    # 'price_tick': 0.5,          # 最小变动价位（自动获取，手动指定请取消注释）
+                    'kline_period': '5m',         # K线周期
                     'order_offset_ticks': 10,     # 下单偏移跳数
-                    
+
                     'algo_trading': False,        # 智能交易开关
                     'order_timeout': 10,          # 超时时间
                     'retry_limit': 3,             # 重试次数
                     'retry_offset_ticks': 5,      # 重试偏移
-                    
+
                     'auto_roll_enabled': False,   # 自动移仓开关
                     'auto_roll_reopen': True,     # 移仓后自动重新开仓
-                    
+
                     'preload_history': True,      # 预加载历史数据
                     'history_lookback_bars': 2000, # 预加载K线数量
-                    'adjust_type': '1',           # 复权: '0'不复权  '1'后复权  '2'前复权
+                    'adjust_type': '1',           # 复权: '0'不复权, '1'后复权, '2'前复权
                 },
                 {   # 数据源2: 焦煤 1分钟
                     'symbol': 'jm888',            # 主力合约（自动映射）
-                    'kline_period': '60m',         # K线周期
-                    # 'price_tick': 0.5,          # 最小变动价位（自动获取，手动指定请取消注释）
+                    'kline_period': '1m',         # K线周期
                     'order_offset_ticks': 10,     # 下单偏移跳数
-                    
+
                     'algo_trading': False,        # 智能交易开关
                     'order_timeout': 10,          # 超时时间
                     'retry_limit': 3,             # 重试次数
                     'retry_offset_ticks': 5,      # 重试偏移
-                    
+
                     'auto_roll_enabled': False,   # 自动移仓开关
                     'auto_roll_reopen': True,     # 移仓后自动重新开仓
-                    
+
                     'preload_history': True,      # 预加载历史数据
                     'history_lookback_bars': 2000, # 预加载K线数量
-                    'adjust_type': '1',           # 复权: '0'不复权  '1'后复权  '2'前复权
+                    'adjust_type': '1',           # 复权: '0'不复权, '1'后复权, '2'前复权
                 },
                 {   # 数据源3: 焦煤 5分钟
                     'symbol': 'jm888',            # 同品种不同周期
-                    'kline_period': '60m',         # K线周期
-                    # 'price_tick': 0.5,          # 最小变动价位（自动获取，手动指定请取消注释）
+                    'kline_period': '5m',         # K线周期
                     'order_offset_ticks': 10,     # 下单偏移跳数
-                    
+
                     'algo_trading': False,        # 智能交易开关
                     'order_timeout': 10,          # 超时时间
                     'retry_limit': 3,             # 重试次数
                     'retry_offset_ticks': 5,      # 重试偏移
-                    
+
                     'auto_roll_enabled': False,   # 自动移仓开关
                     'auto_roll_reopen': True,     # 移仓后自动重新开仓
-                    
+
                     'preload_history': True,      # 预加载历史数据
                     'history_lookback_bars': 2000, # 预加载K线数量
-                    'adjust_type': '1',           # 复权: '0'不复权  '1'后复权  '2'前复权
+                    'adjust_type': '1',           # 复权: '0'不复权, '1'后复权, '2'前复权
                 },
             ],
-            
-            # -------- 数据窗口配置 --------
+
             lookback_bars=500,                # K线回溯窗口 (0=不限制，策略get_klines返回的最大条数)
-            
-            # -------- 回调模式配置 --------
-            enable_tick_callback=False,       # TICK回调: False=K线驱动, True=TICK驱动
-            
-            # -------- 数据保存配置 --------
-            save_kline_csv=False,             # 保存K线到CSV文件
-            save_kline_db=False,              # 保存K线到SQLite数据库
-            save_tick_csv=False,              # 保存TICK到CSV文件
-            save_tick_db=False,               # 保存TICK到SQLite数据库
+
+            enable_tick_callback=False, # 是否启用逐Tick回调（高CPU占用）
+
+            save_kline_csv=False,   # 是否保存K线到CSV文件
+            save_kline_db=False,    # 是否保存K线到SQLite数据库
+            save_tick_csv=False,    # 是否保存Tick到CSV文件
+            save_tick_db=False,     # 是否保存Tick到SQLite数据库
         )
-    
+
     elif RUN_MODE == RunMode.REAL_TRADING:
         # ==================== 实盘配置 (多品种多周期) ====================
         config = get_config(RUN_MODE,
-            # -------- 账户配置 --------
+            kline_source='data_server',              # K线源: 'local'(CTP本地聚合) 或 'data_server'(远程推送,需账号)
             account='real_default',           # 账户名称 (对应trading_config.py中的配置)
-            
-            # -------- K线来源 --------
-            # 默认 'local'：本地CTP Tick合成K线
-            # 'data_server'：远程推送K线（需在 trading_config.py 配置账号）
-            kline_source='data_server',
-            
-            # -------- 多品种 data_sources --------
+
             data_sources=[
                 {   # 数据源0: 焦炭 1分钟
                     'symbol': 'j888',             # 主力合约（自动映射）
                     'kline_period': '1m',         # K线周期
-                    # 'price_tick': 0.5,          # 最小变动价位（自动获取，手动指定请取消注释）
                     'order_offset_ticks': 10,     # 下单偏移跳数 (挂单距离)
-                    
+
                     'algo_trading': False,        # 智能交易开关
                     'order_timeout': 10,          # 超时时间
                     'retry_limit': 3,             # 重试次数
                     'retry_offset_ticks': 5,      # 重试偏移
-                    
+
                     'auto_roll_enabled': False,   # 自动移仓开关
                     'auto_roll_reopen': True,     # 移仓后自动重新开仓
-                    
+
                     'preload_history': True,      # 是否预加载历史数据
                     'history_lookback_bars': 2000, # 预加载K线数量
-                    'adjust_type': '1',           # 复权: '0'不复权  '1'后复权  '2'前复权
+                    'adjust_type': '1',           # 复权: '0'不复权, '1'后复权, '2'前复权
                 },
                 {   # 数据源1: 焦炭 5分钟
                     'symbol': 'j888',             # 同品种不同周期
                     'kline_period': '5m',         # K线周期
-                    # 'price_tick': 0.5,          # 最小变动价位（自动获取，手动指定请取消注释）
                     'order_offset_ticks': 10,     # 下单偏移跳数
-                    
+
                     'algo_trading': False,        # 智能交易开关
                     'order_timeout': 10,          # 超时时间
                     'retry_limit': 3,             # 重试次数
                     'retry_offset_ticks': 5,      # 重试偏移
-                    
+
                     'auto_roll_enabled': False,   # 自动移仓开关
                     'auto_roll_reopen': True,     # 移仓后自动重新开仓
-                    
+
                     'preload_history': True,      # 预加载历史数据
                     'history_lookback_bars': 2000, # 预加载K线数量
-                    'adjust_type': '1',           # 复权: '0'不复权  '1'后复权  '2'前复权
+                    'adjust_type': '1',           # 复权: '0'不复权, '1'后复权, '2'前复权
                 },
                 {   # 数据源2: 焦煤 1分钟
                     'symbol': 'jm888',            # 主力合约（自动映射）
                     'kline_period': '1m',         # K线周期
-                    # 'price_tick': 0.5,          # 最小变动价位（自动获取，手动指定请取消注释）
                     'order_offset_ticks': 10,     # 下单偏移跳数
-                    
+
                     'algo_trading': False,        # 智能交易开关
                     'order_timeout': 10,          # 超时时间
                     'retry_limit': 3,             # 重试次数
                     'retry_offset_ticks': 5,      # 重试偏移
-                    
+
                     'auto_roll_enabled': False,   # 自动移仓开关
                     'auto_roll_reopen': True,     # 移仓后自动重新开仓
-                    
+
                     'preload_history': True,      # 预加载历史数据
                     'history_lookback_bars': 2000, # 预加载K线数量
-                    'adjust_type': '1',           # 复权: '0'不复权  '1'后复权  '2'前复权
+                    'adjust_type': '1',           # 复权: '0'不复权, '1'后复权, '2'前复权
                 },
                 {   # 数据源3: 焦煤 5分钟
                     'symbol': 'jm888',            # 同品种不同周期
                     'kline_period': '5m',         # K线周期
-                    # 'price_tick': 0.5,          # 最小变动价位（自动获取，手动指定请取消注释）
                     'order_offset_ticks': 10,     # 下单偏移跳数
-                    
+
                     'algo_trading': False,        # 智能交易开关
                     'order_timeout': 10,          # 超时时间
                     'retry_limit': 3,             # 重试次数
                     'retry_offset_ticks': 5,      # 重试偏移
-                    
+
                     'auto_roll_enabled': False,   # 自动移仓开关
                     'auto_roll_reopen': True,     # 移仓后自动重新开仓
-                    
+
                     'preload_history': True,      # 预加载历史数据
                     'history_lookback_bars': 2000, # 预加载K线数量
-                    'adjust_type': '1',           # 复权: '0'不复权  '1'后复权  '2'前复权
+                    'adjust_type': '1',           # 复权: '0'不复权, '1'后复权, '2'前复权
                 },
             ],
-            
-            # -------- 数据窗口配置 --------
+
             lookback_bars=500,                # K线回溯窗口 (0=不限制，策略get_klines返回的最大条数)
-            
-            # -------- 回调模式配置 --------
-            enable_tick_callback=False,       # TICK回调: False=K线驱动, True=TICK驱动
-            
-            # -------- 数据保存配置 --------
-            save_kline_csv=False,             # 保存K线到CSV文件
-            save_kline_db=False,              # 保存K线到SQLite数据库
-            save_tick_csv=False,              # 保存TICK到CSV文件
-            save_tick_db=False,               # 保存TICK到SQLite数据库
+
+            enable_tick_callback=False, # Tick回调
+
+            save_kline_csv=False,   # 保存K线CSV
+            save_kline_db=False,    # 保存K线DB
+            save_tick_csv=False,    # 保存Tick CSV
+            save_tick_db=False,     # 保存Tick DB
         )
     else:
         raise ValueError(f"不支持的运行模式: {RUN_MODE}")
-    
+
     # ========== 创建运行器并执行 ==========
     print("\n" + "="*80)
     print("多品种多周期交易策略 - 统一运行版本")
@@ -564,13 +521,13 @@ if __name__ == "__main__":
         print(f"合约代码: {config['symbol']}")
     print(f"策略参数: 快线={strategy_params['fast_ma']}, 慢线={strategy_params['slow_ma']}")
     print("="*80 + "\n")
-    
+
     # 创建运行器
     runner = UnifiedStrategyRunner(mode=RUN_MODE)
-    
+
     # 设置配置
     runner.set_config(config)
-    
+
     # 运行策略
     try:
         results = runner.run(
@@ -578,7 +535,7 @@ if __name__ == "__main__":
             initialize=initialize,
             strategy_params=strategy_params
         )
-    
+
     except KeyboardInterrupt:
         print("\n用户中断")
         runner.stop()
@@ -587,4 +544,3 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         runner.stop()
-

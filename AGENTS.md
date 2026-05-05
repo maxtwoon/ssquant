@@ -1,94 +1,106 @@
 # SSQuant — AI Agent 项目上下文
 
-## 项目概述
+> **Version**: 0.4.5  
+> **License**: MIT  
+> **Language**: Python 3.9–3.14  
 
-SSQuant 是一个专业的 **中国期货 CTP 量化交易框架**（**v0.4.4**），基于 Python 构建，涵盖回测、仿真（SIMNOW）和实盘全链路。
+---
 
-**v0.4.4 要点**：回测侧交易配对/权益/滑点/盈亏比等统计修复；多数据源支持 `capital_ratio` 比例分配资金；data_server 历史 K 线 HTTP 与 `fallback_servers` 与鉴权一致轮询；详见仓库根目录 **`更新日志_v0.4.4.md`**。
+## 项目定位
 
-## 技术栈
+SSQuant（松鼠Quant）是中国期货 CTP 量化交易框架，支持**一套代码三处运行**：回测 / SIMNOW 仿真 / 实盘。
 
-- **语言**: Python 3.9–3.14
-- **CTP 接口**: 上期技术 CTP 6.7.7 及以上版本（Windows x64 + Linux x64）
-- **数据**: REST API + WebSocket（data_server 模式）、本地复权算法
-- **核心依赖**: pandas, numpy, websockets, requests
+**v0.4.5 核心变化**：
+- 回测速度 **30×–100×** 提升（ndarray 缓存 + IndicatorCache v2 + 增量账户状态）
+- 新增**本地数据模式**（`data_source_mode='local'`），免会员直读 SQLite
+- 许可证从 Proprietary 改为 **MIT**
+- PyPI 仅保留 redirect 包，真实安装必须通过 `git+https://github.com/songshuquant/ssquant.git`
+
+---
 
 ## 目录结构
 
 ```
 ssquant/
-├── api/              # StrategyAPI — 策略唯一入口
-│   └── strategy_api.py
-├── backtest/         # 回测引擎、自动移仓、复权审计
-│   ├── backtester.py
-│   ├── rollover_engine.py
-│   └── rollover_audit.py
-├── config/           # 交易配置（回测/仿真/实盘）
-│   └── trading_config.py
-├── ctp/              # CTP 动态库加载
-├── data/             # 数据源、本地复权、合约映射
-│   ├── data_source.py
-│   ├── local_adjust.py
-│   └── contract_mapper.py
-├── indicators/       # 技术指标
-├── pyctp/            # CTP 客户端（SIMNOW / 实盘）
-│   ├── simnow_client.py
-│   └── real_trading_client.py
-└── __init__.py       # __version__ = "0.4.4"
-examples/             # 25+ 示例策略（B_回测 / A_工具 / C_高级 / D_数据）
+├── api/
+│   └── strategy_api.py          # StrategyAPI（策略唯一入口，含 IndicatorCache / ndarray 接口）
+├── backtest/
+│   ├── backtest_core.py         # 回测引擎主循环（热点优化核心）
+│   ├── unified_runner.py        # 统一运行器（BACKTEST / SIMNOW / REAL_TRADING）
+│   ├── live_trading_adapter.py  # 实盘/SIMNOW 桥接（Tick 队列、智能追单、移仓）
+│   ├── backtest_results.py      # 权益曲线计算（__slots__ 纯对象优化）
+│   ├── rollover_engine.py       # 自动移仓引擎
+│   └── rollover_audit.py        # 移仓复盘日志
+├── config/
+│   ├── trading_config.py        # 默认参数、账户配置（仅数据，逻辑抽离到 config_helpers）
+│   ├── config_helpers.py        # get_config()、连续合约解析等业务逻辑
+│   └── _server_config.py        # data_server 连接配置
+├── data/
+│   ├── data_source.py           # DataSource（ndarray 缓存、本地模式、IndicatorCache）
+│   ├── api_data_fetcher.py      # REST API + SQLite 缓存
+│   ├── local_data_loader.py     # 本地 SQLite 导入/加载
+│   ├── local_adjust.py          # 前复权/后复权
+│   └── contract_mapper.py       # 888/777/000 连续合约映射
+├── ctp/py39~py314/              # CTP 二进制（.pyd/.dll/.so）
+├── pyctp/                       # CTP 客户端封装
+└── indicators/
+
+examples/                          # 策略示例（含 *_高性能.py 版本）
+ai_agent/                          # AI 策略助手（前端 + 后端）
+045/SKILL.md                       # 完整框架指南（909 行，面向用户/Agent）
 ```
 
-## 核心模式
-
-| 运行模式 | RunMode 枚举 | 用途 |
-|---------|-------------|------|
-| 回测 | `RunMode.BACKTEST` | 历史数据离线回测 |
-| SIMNOW | `RunMode.SIMNOW` | 上期 SIMNOW 仿真交易 |
-| 实盘 | `RunMode.REAL_TRADING` | 期货公司真实交易 |
-
-## 策略生命周期
-
-```python
-from ssquant.api.strategy_api import StrategyAPI
-from ssquant.config.trading_config import get_config, RunMode
-
-def initialize(api: StrategyAPI):
-    """一次性初始化（可选）"""
-    api.log("策略启动")
-
-def strategy(api: StrategyAPI):
-    """每根K线收盘 / 每个Tick 调用"""
-    klines = api.get_klines()
-    if len(klines) < 20:
-        return
-    price = api.get_price()
-    pos = api.get_pos()
-    # 交易逻辑 ...
-    if should_buy:
-        api.buy(volume=1, reason="信号触发")
-
-config = get_config(RunMode.BACKTEST, symbol="rb888", ...)
-```
+---
 
 ## 关键约定
 
-1. **所有交易操作**通过 `StrategyAPI` 进行：`buy / sell / sellshort / buycover / close_all`
-2. **连续合约**: `888`（主力连续）、`777`（次主力）、`000`（指数合约）
-3. **复权类型**: `adjust_type='0'`(不复权) / `'1'`(后复权) / `'2'`(前复权)
-4. **移仓模式**: `simultaneous`（同时平旧开新）/ `sequential`（先平后开）
-5. **data_server 模式**: 服务器推送任意周期 K 线 + 订单流，无需本地聚合；HTTP 鉴权与历史 K 线请求均遵循 `api_url` + `fallback_servers` 顺序（v0.4.4+）
-6. **不再支持 PyPI**，仅通过 Git 仓库安装更新
+1. **策略唯一入口**：`StrategyAPI`（`buy / sell / sellshort / buycover / close_all`）
+2. **连续合约**：`888`（主力）、`777`（次主力）、`000`（指数）
+3. **复权类型**：`adjust_type='0'` 不复权 / `'1'` 后复权 / `'2'` 前复权
+4. **数据模式**：
+   - `data_source_mode='data_server'`（默认）：远程 API，需会员账号
+   - `data_source_mode='local'`：本地 SQLite，免会员，TICK 回测强制使用
+5. **移仓模式**：`simultaneous`（同时平旧开新）/ `sequential`（先平后开）
+6. **默认高性能写法**：所有策略必须在 `initialize(api)` 中用 `api.register_indicator()` 注册指标，`strategy()` 中 O(1) 查表。普通 Pandas 写法仅作为 fallback
+7. **不再支持 PyPI**：仅通过 Git 仓库安装
 
-## AI Agent 技能
+---
 
-详见 `.claude/skills/` 目录下的 5 个技能模块：
+## 编码规范
 
-| 技能 | 目录 | 能力 |
+- **所有交易操作**必须通过 `StrategyAPI`，禁止直接操作底层 CTP 接口
+- **策略函数签名**：`def strategy(api: StrategyAPI):` 或 `def strategy(api: StrategyAPI, params: dict):`
+- **initialize 钩子（必需）**：`def initialize(api: StrategyAPI):`，**默认在此注册所有指标**。AI 写策略时，优先使用 `api.register_indicator()` + `api.get_indicator()` / `api.get_indicator_array()`
+- **回退条件**：仅当指标逻辑无法用 `register_indicator` 表达（如动态窗口、实时跨品种复杂计算、非滚动型状态机）时，才回退到 Pandas 普通写法
+- **日志**：回测用 `api.log()`，实盘用 `api.log()`（框架自动区分）
+- **异常处理**：实盘策略应捕获异常，避免单根 K 线报错导致整个进程退出
+
+---
+
+## 常见陷阱
+
+| 问题 | 原因 | 解决 |
 |------|------|------|
-| 策略编写 | `ssquant-strategy` | 编写符合框架规范的期货策略 |
-| 回测验证 | `ssquant-backtest` | 配置并执行回测、分析结果 |
-| 部署上线 | `ssquant-deploy` | SIMNOW 仿真 → 实盘部署 |
-| 问题诊断 | `ssquant-debug` | 排查 CTP、数据、策略异常 |
-| 数据查询 | `ssquant-data` | 查询行情、持仓、账户数据；含 data_server 与备用节点 |
+| `ModuleNotFoundError: No module named 'ssquant'` | 从 PyPI 安装了 redirect 包 | 卸载后通过 Git 安装：`pip install git+https://github.com/songshuquant/ssquant.git` |
+| 回测无数据 | 远程模式鉴权失败 或 本地模式无数据 | 检查 `data_source_mode`；本地模式先运行 `examples/A_工具_导入数据库DB示例.py` |
+| TICK 回测报错 | TICK 数据不支持远程模式 | 必须设置 `data_source_mode='local'` |
+| 策略在 SIMNOW/实盘指标值不对 | 未使用 IndicatorCache v2 | `register_indicator` 在三模式通用，默认必须使用 |
+| 回测速度远低于预期 | 策略内使用 Pandas `rolling/ewm/iloc` 重复计算 | 将指标注册到 `initialize()`，策略内仅做 O(1) 查表 |
+| 多品种回测数据错位 | `align_data=True` 导致不同周期数据源被错误截断 | 多品种多周期通常设为 `align_data=False` |
 
-各技能包 frontmatter 中 `version` 与框架 **v0.4.4** 对齐；发布说明见 **`更新日志_v0.4.4.md`**。
+---
+
+## 关键文件速查
+
+| 需求 | 文件 |
+|------|------|
+| 最新更新详情 | `045.MD` |
+| 框架完整指南 | `045/SKILL.md` |
+| 项目 README | `README.md` |
+| AI Agent 上下文 | `AGENTS.md`（本文件） |
+| 策略 API | `ssquant/api/strategy_api.py` |
+| 回测引擎 | `ssquant/backtest/backtest_core.py` |
+| 三模式统一入口 | `ssquant/backtest/unified_runner.py` |
+| 数据源/缓存 | `ssquant/data/data_source.py` |
+| 配置生成 | `ssquant/config/config_helpers.py` |
+| 合约映射 | `ssquant/data/contract_mapper.py` |

@@ -9,6 +9,9 @@ class BacktestLogger:
         self.log_file = None
         self.performance_file = None
         self.debug_mode = debug_mode
+        # P7：持久文件句柄。prepare_log_file 中开，log_message / log_important 直写，
+        # close() / 下一次 prepare_log_file 中关闭。避免每条日志开关一次文件（~50μs/行）。
+        self._log_fp = None
     
     def set_debug_mode(self, debug_mode):
         """设置调试模式
@@ -27,6 +30,9 @@ class BacktestLogger:
         Returns:
             log_file_path: 日志文件路径
         """
+        # 进入新 run 之前，确保关掉上一次留下的句柄
+        self._close_log_fp()
+
         # 检查是否禁用可视化和日志
         if os.environ.get('NO_VISUALIZATION', '').lower() == 'true':
             # 在参数优化过程中禁用日志文件
@@ -50,14 +56,43 @@ class BacktestLogger:
             os.makedirs(results_dir)
         self.performance_file = os.path.join(results_dir, f"performance_{symbols_str}_{timestamp}.txt")
         
-        # 写入日志头
-        with open(self.log_file, 'w', encoding='utf-8') as f:
-            f.write(f"多数据源回测日志 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"回测品种: {symbols_str}\n")
-            f.write("-" * 80 + "\n\n")
-            
+        # P7：直接打开持久句柄写入日志头，后续 log_message / log_important 共用此句柄。
+        # 用 'w' 覆盖式打开（新建空文件），写入头部后保持打开，写入由 OS buffer 攒批。
+        try:
+            self._log_fp = open(self.log_file, 'w', encoding='utf-8')
+            self._log_fp.write(f"多数据源回测日志 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            self._log_fp.write(f"回测品种: {symbols_str}\n")
+            self._log_fp.write("-" * 80 + "\n\n")
+        except Exception:
+            # 异常时回退：句柄置 None，写入路径会自动跳过文件输出
+            self._log_fp = None
+
         return self.log_file
-    
+
+    def _close_log_fp(self):
+        """安全关闭持久日志句柄。可重复调用。"""
+        fp = self._log_fp
+        if fp is not None:
+            self._log_fp = None
+            try:
+                fp.flush()
+            except Exception:
+                pass
+            try:
+                fp.close()
+            except Exception:
+                pass
+
+    def close(self):
+        """关闭日志资源。run_backtest 结束 / 程序退出时调用。"""
+        self._close_log_fp()
+
+    def __del__(self):
+        try:
+            self._close_log_fp()
+        except Exception:
+            pass
+
     def log_message(self, message):
         """记录日志消息
         
@@ -71,11 +106,19 @@ class BacktestLogger:
         if self.debug_mode and not os.environ.get('NO_CONSOLE_LOG', '').lower() == 'true':
             print(log_message)  # 打印到控制台
         
-        # 如果有日志文件，并且未禁用日志，则写入
-        # 即使在debug=False模式下也写入关键日志信息
-        if self.log_file and not os.environ.get('NO_VISUALIZATION', '').lower() == 'true':
-            with open(self.log_file, 'a', encoding='utf-8') as f:
-                f.write(log_message + "\n")
+        # 如果有持久句柄且未禁用日志，则直接写入；不再每条 open/close。
+        if self._log_fp is not None and not os.environ.get('NO_VISUALIZATION', '').lower() == 'true':
+            try:
+                self._log_fp.write(log_message + "\n")
+            except Exception:
+                # 句柄异常时降级：关闭句柄 + 退回老路径，至少不丢日志
+                self._close_log_fp()
+                if self.log_file:
+                    try:
+                        with open(self.log_file, 'a', encoding='utf-8') as f:
+                            f.write(log_message + "\n")
+                    except Exception:
+                        pass
 
     def log_important(self, message):
         """记录关键提示：无论 debug 是否开启，都尽量输出到控制台。"""
@@ -84,9 +127,17 @@ class BacktestLogger:
 
         print(log_message)
 
-        if self.log_file and not os.environ.get('NO_VISUALIZATION', '').lower() == 'true':
-            with open(self.log_file, 'a', encoding='utf-8') as f:
-                f.write(log_message + "\n")
+        if self._log_fp is not None and not os.environ.get('NO_VISUALIZATION', '').lower() == 'true':
+            try:
+                self._log_fp.write(log_message + "\n")
+            except Exception:
+                self._close_log_fp()
+                if self.log_file:
+                    try:
+                        with open(self.log_file, 'a', encoding='utf-8') as f:
+                            f.write(log_message + "\n")
+                    except Exception:
+                        pass
     
     def get_performance_file(self):
         """获取绩效报告文件路径"""

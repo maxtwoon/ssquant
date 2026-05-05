@@ -198,5 +198,5 @@ def reset_auth():
 def _print_fail():
     """打印鉴权失败信息"""
     print(f"[鉴权] 验证失败: {_auth_message}")
-    print(f"[鉴权] 请检查 ssquant/config/trading_config.py 中的 API_USERNAME 和 API_PASSWORD")
+    print(f"[鉴权] 请检查 ssquant/config/trading_config.py 中的俱乐部账号(API_USERNAME)和俱乐部密码(API_PASSWORD)")
     print(f"[鉴权] 如有疑问，请联系小松鼠 微信: viquant01\n")

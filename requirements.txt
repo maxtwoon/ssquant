@@ -5,16 +5,16 @@
 numpy>=1.20.0
 pandas>=1.3.0
 requests>=2.25.0
+websockets>=10.0          # data_server WebSocket 实时推送
 
 # 可视化依赖（回测报告需要）
 plotly>=5.18.0
-
-# 数据获取
-akshare>=1.10.0
-
-# 以下依赖已废弃，保留用于兼容（可选）
 matplotlib>=3.5.0
-# scipy>=1.7.0
-# Pillow>=8.0.0
+Pillow>=8.0.0             # 报告图片处理
+scipy>=1.7.0              # 曲线平滑插值
+
+# 数据获取与处理
+akshare>=1.10.0
+openpyxl>=3.0.0           # Excel 导入/导出（pandas.read_excel 需要）
 
 

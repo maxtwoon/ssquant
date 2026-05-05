@@ -4,7 +4,8 @@
     "api_key": "",
     "model": "deepseek-chat",
     "temperature": 0.7,
-    "base_url": "https://api.deepseek.com/v1"
+    "base_url": "https://api.deepseek.com/v1",
+    "extra_params": ""
   },
   "backtest_params": {
     "strategy_mode": "single",

@@ -45,7 +45,7 @@ CORS(app)
 STRATEGIES_DIR = PROJECT_ROOT / "ai_agent" / "strategies"
 BACKTEST_RESULTS_DIR = PROJECT_ROOT / "backtest_results"
 BACKTEST_LOGS_DIR = PROJECT_ROOT / "backtest_logs"
-# 本地提示词文件已废弃，现在必须从远程服务器加载
+# 本地提示词文件（ai_agent/prompt.py），无需远程服务器和鉴权
 # PROMPT_FILE = PROJECT_ROOT / "ssquant提示词模板" / "ssquant_prompt.py"
 SETTINGS_FILE = PROJECT_ROOT / "ai_agent" / "settings.json"
 HISTORY_FILE = PROJECT_ROOT / "ai_agent" / "history.json"
@@ -87,7 +87,8 @@ def get_default_settings():
             "api_key": "",
             "model": "deepseek-chat",
             "temperature": 0.7,
-            "base_url": "https://api.deepseek.com/v1"  # 用户可自定义的API接口地址
+            "base_url": "https://api.deepseek.com/v1",  # 用户可自定义的API接口地址
+            "extra_params": ""  # JSON字符串，支持思考模式等厂商特定参数
         },
         "backtest_params": {
             "strategy_mode": "single",
@@ -239,100 +240,29 @@ class AppState:
 state = AppState()
 
 # ==================== 提示词加载 ====================
-def get_api_credentials():
-    """从 trading_config.py 获取API认证信息"""
-    try:
-        from ssquant.config.trading_config import API_USERNAME, API_PASSWORD
-        return API_USERNAME, API_PASSWORD
-    except ImportError:
-        print("[WARN] 无法导入 trading_config，使用空凭证")
-        return "", ""
-    except Exception as e:
-        print(f"[WARN] 获取API凭证失败: {e}")
-        return "", ""
-
-
-def load_remote_prompt():
-    """从远程服务器加载提示词"""
-    try:
-        username, password = get_api_credentials()
-        
-        if not username or not password:
-            return None, "需要在 ssquant/config/trading_config.py 里填写俱乐部账号密码（API_USERNAME 和 API_PASSWORD）"
-        
-        headers = {
-            'X-Username': username,
-            'X-Password': password,
-            'Content-Type': 'application/json'
-        }
-        
-        response = requests.get(
-            f"{PROMPT_SERVER_URL}/api/prompt/ssquant",
-            headers=headers,
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('success') and data.get('prompt'):
-                print(f"[OK] 成功从远程服务器加载提示词 ({len(data['prompt'])} 字符)")
-                return data['prompt'], None
-            else:
-                return None, data.get('error', '未知错误')
-        elif response.status_code == 401:
-            # 账号密码错误
-            data = response.json()
-            return None, data.get('message', '认证失败，请检查俱乐部账号密码')
-        elif response.status_code == 403:
-            # 权限不足（如过期、无权限等）
-            data = response.json()
-            return None, data.get('message', '权限验证失败')
-        else:
-            # 其他错误，尝试获取详细信息
-            try:
-                data = response.json()
-                error_msg = data.get('message') or data.get('error') or f"服务器返回错误: {response.status_code}"
-                return None, error_msg
-            except:
-                return None, f"服务器返回错误: {response.status_code}"
-            
-    except requests.exceptions.ConnectionError:
-        return None, "无法连接到提示词服务器"
-    except requests.exceptions.Timeout:
-        return None, "连接提示词服务器超时"
-    except Exception as e:
-        return None, f"加载远程提示词失败: {str(e)}"
-
-
 def load_system_prompt():
-    """加载SSQuant系统提示词
+    """加载SSQuant系统提示词（本地版本）
     
-    必须从远程服务器加载并通过鉴权，鉴权失败则无法使用AI功能
+    直接从 ai_agent/prompt.py 加载，无需远程服务器和鉴权
     """
     global PROMPT_LOAD_ERROR
     PROMPT_LOAD_ERROR = None
     
-    print("[INFO] 正在从远程服务器加载提示词...")
-    prompt, error = load_remote_prompt()
-    
-    if prompt:
-        # 鉴权成功
-        return prompt
-    else:
-        # 鉴权失败
-        PROMPT_LOAD_ERROR = error
-        print(f"[ERROR] 鉴权失败: {error}")
-        print("[ERROR] 无法使用AI策略生成功能")
-        # 返回一个简单的提示词，提醒用户需要鉴权
-        return f"""你是SSQuant量化交易策略开发助手。
+    try:
+        from ai_agent.prompt import SSQUANT_SYSTEM_PROMPT
+        print(f"[OK] 成功从本地加载提示词 ({len(SSQUANT_SYSTEM_PROMPT)} 字符)")
+        return SSQUANT_SYSTEM_PROMPT
+    except Exception as e:
+        PROMPT_LOAD_ERROR = str(e)
+        print(f"[ERROR] 加载本地提示词失败: {e}")
+        # 返回一个基本提示词作为降级方案
+        return """你是SSQuant量化交易策略开发助手。
 
-⚠️ 警告：当前未通过俱乐部鉴权，无法使用完整的策略生成功能。
+⚠️ 警告：无法加载本地提示词文件 ai_agent/prompt.py。
 
-错误信息：{error}
+错误信息：""" + str(e) + """
 
-请在 ssquant/config/trading_config.py 中正确填写俱乐部账号密码（API_USERNAME 和 API_PASSWORD），然后重启AI Agent。
-
-如需开通AI助手权限，请联系松鼠Quant俱乐部。
+请检查 ai_agent/prompt.py 文件是否存在且格式正确。
 """
 
 
@@ -340,15 +270,52 @@ def load_system_prompt():
 PROMPT_LOAD_ERROR = None
 SYSTEM_PROMPT = load_system_prompt()
 
-# AI API调用（流式，使用 OpenAI SDK - 静默自动续写）
+def _parse_extra_params(settings):
+    """解析用户配置的额外 JSON 参数（思考模式、推理强度等）"""
+    extra_str = settings.get("extra_params", "")
+    if not extra_str:
+        return {}
+    try:
+        import json
+        extra = json.loads(extra_str)
+        if not isinstance(extra, dict):
+            return {}
+        # 过滤掉不允许覆盖的关键参数（避免破坏流式调用和消息结构）
+        for key in ("messages", "stream"):
+            extra.pop(key, None)
+        return extra
+    except Exception:
+        return {}
+
+def _is_claude_provider(provider):
+    """判断是否为 Claude 提供商（原生 Anthropic API）"""
+    return provider and provider.lower() in ('claude', 'anthropic')
+
+def _convert_messages_for_claude(messages):
+    """
+    将 OpenAI 格式的 messages 转换为 Claude 格式。
+    Claude 要求 system prompt 作为独立参数，messages 中只能有 user/assistant。
+    """
+    system_parts = []
+    claude_messages = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role == "system":
+            system_parts.append(content)
+        elif role in ("user", "assistant"):
+            claude_messages.append({"role": role, "content": content})
+        # 忽略其他 role（如 tool/function）
+    system = "\n\n".join(system_parts) if system_parts else None
+    return system, claude_messages
+
+# AI API调用（流式，支持 OpenAI / Claude 多厂商，静默自动续写）
 def call_ai_api_stream(messages, settings):
     """调用AI API（流式输出，使用 OpenAI SDK，静默自动续写）
     
-    支持任何兼容 OpenAI API 格式的大模型服务
+    支持 OpenAI SDK 兼容格式 及 Claude (Anthropic) 原生 API
     用户可自定义 base_url 来使用不同的服务商
     """
-    from openai import OpenAI
-    
     # 检查鉴权状态，鉴权失败则拒绝服务
     if PROMPT_LOAD_ERROR:
         yield {"error": f"⚠️ 俱乐部鉴权失败，无法使用AI功能。\n\n错误信息：{PROMPT_LOAD_ERROR}\n\n请在 ssquant/config/trading_config.py 中正确填写俱乐部账号密码，然后重启AI Agent。"}
@@ -364,53 +331,93 @@ def call_ai_api_stream(messages, settings):
         yield {"error": "请先配置API Key"}
         return
     
-    # 根据提供商设置 base_url（优先使用用户自定义的 base_url）
-    if custom_base_url:
-        base_url = custom_base_url.rstrip('/')  # 移除末尾斜杠
-    elif provider == "DeepSeek":
-        base_url = "https://api.deepseek.com/v1"
-    elif provider == "OpenAI":
-        base_url = "https://api.openai.com/v1"
-    else:
-        base_url = "https://api.deepseek.com/v1"
+    is_claude = _is_claude_provider(provider)
     
     try:
-        # 创建 OpenAI 客户端
-        client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=300.0,
-        )
-        
-        current_messages = messages.copy()
-        
-        while True:  # 自动续写直到完成
-            stream = client.chat.completions.create(
-                model=model,
-                messages=current_messages,
-                temperature=temperature,
-                stream=True,
-            )
+        if is_claude:
+            # ========== Claude (Anthropic) 流式调用 ==========
+            import anthropic
             
-            chunk_response = ""
-            finish_reason = None
+            client = anthropic.Anthropic(api_key=api_key, timeout=300.0)
+            system_prompt, current_messages = _convert_messages_for_claude(messages)
             
-            for chunk in stream:
-                if chunk.choices and len(chunk.choices) > 0:
-                    delta = chunk.choices[0].delta
-                    if delta and delta.content:
-                        chunk_response += delta.content
-                        yield {"content": delta.content}
-                    if chunk.choices[0].finish_reason:
-                        finish_reason = chunk.choices[0].finish_reason
+            while True:  # 自动续写直到完成
+                kwargs = {
+                    "model": model,
+                    "messages": current_messages,
+                    "temperature": temperature,
+                    "max_tokens": 8192,
+                    "stream": True,
+                }
+                if system_prompt:
+                    kwargs["system"] = system_prompt
+                kwargs.update(_parse_extra_params(settings))
+                
+                stream = client.messages.create(**kwargs)
+                
+                chunk_response = ""
+                stop_reason = None
+                
+                for chunk in stream:
+                    if chunk.type == "content_block_delta":
+                        text = chunk.delta.text if hasattr(chunk.delta, 'text') else ""
+                        if text:
+                            chunk_response += text
+                            yield {"content": text}
+                    elif chunk.type == "message_delta":
+                        stop_reason = chunk.delta.stop_reason if hasattr(chunk.delta, 'stop_reason') else None
+                
+                # 如果因为长度截断(max_tokens)，静默续写
+                if stop_reason == "max_tokens":
+                    current_messages.append({"role": "assistant", "content": chunk_response})
+                    current_messages.append({"role": "user", "content": "继续"})
+                else:
+                    break
+        else:
+            # ========== OpenAI 兼容格式流式调用 ==========
+            from openai import OpenAI
             
-            # 如果因为长度截断，静默续写
-            if finish_reason == "length":
-                current_messages.append({"role": "assistant", "content": chunk_response})
-                current_messages.append({"role": "user", "content": "继续"})
+            if custom_base_url:
+                base_url = custom_base_url.rstrip('/')
+            elif provider == "DeepSeek":
+                base_url = "https://api.deepseek.com/v1"
+            elif provider == "OpenAI":
+                base_url = "https://api.openai.com/v1"
             else:
-                break  # 正常结束
-        
+                base_url = "https://api.deepseek.com/v1"
+            
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=300.0)
+            current_messages = messages.copy()
+            
+            while True:  # 自动续写直到完成
+                kwargs = {
+                    "model": model,
+                    "messages": current_messages,
+                    "temperature": temperature,
+                    "stream": True,
+                }
+                kwargs.update(_parse_extra_params(settings))
+                stream = client.chat.completions.create(**kwargs)
+                
+                chunk_response = ""
+                finish_reason = None
+                
+                for chunk in stream:
+                    if chunk.choices and len(chunk.choices) > 0:
+                        delta = chunk.choices[0].delta
+                        if delta and delta.content:
+                            chunk_response += delta.content
+                            yield {"content": delta.content}
+                        if chunk.choices[0].finish_reason:
+                            finish_reason = chunk.choices[0].finish_reason
+                
+                # 如果因为长度截断，静默续写
+                if finish_reason == "length":
+                    current_messages.append({"role": "assistant", "content": chunk_response})
+                    current_messages.append({"role": "user", "content": "继续"})
+                else:
+                    break
+    
     except Exception as e:
         error_msg = str(e)
         if "timeout" in error_msg.lower():
@@ -424,13 +431,7 @@ def call_ai_api_stream(messages, settings):
 
 # AI API调用（非流式，用于分析等）
 def call_ai_api(messages, settings):
-    """调用AI API（非流式，使用 OpenAI SDK）
-    
-    支持任何兼容 OpenAI API 格式的大模型服务
-    用户可自定义 base_url 来使用不同的服务商
-    """
-    from openai import OpenAI
-    
+    """调用AI API（非流式，支持 OpenAI / Claude 多厂商）"""
     # 检查鉴权状态，鉴权失败则拒绝服务
     if PROMPT_LOAD_ERROR:
         return {"error": f"⚠️ 俱乐部鉴权失败，无法使用AI功能。\n\n错误信息：{PROMPT_LOAD_ERROR}\n\n请在 ssquant/config/trading_config.py 中正确填写俱乐部账号密码，然后重启AI Agent。"}
@@ -444,32 +445,55 @@ def call_ai_api(messages, settings):
     if not api_key:
         return {"error": "请先配置API Key"}
     
-    # 根据提供商设置 base_url（优先使用用户自定义的 base_url）
-    if custom_base_url:
-        base_url = custom_base_url.rstrip('/')  # 移除末尾斜杠
-    elif provider == "DeepSeek":
-        base_url = "https://api.deepseek.com/v1"
-    elif provider == "OpenAI":
-        base_url = "https://api.openai.com/v1"
-    else:
-        base_url = "https://api.deepseek.com/v1"
+    is_claude = _is_claude_provider(provider)
     
     try:
-        client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=120.0,
-        )
-        
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=16384,  # 增加到16K
-        )
-        
-        return {"content": response.choices[0].message.content}
-        
+        if is_claude:
+            # ========== Claude (Anthropic) 非流式调用 ==========
+            import anthropic
+            
+            client = anthropic.Anthropic(api_key=api_key, timeout=120.0)
+            system_prompt, claude_messages = _convert_messages_for_claude(messages)
+            
+            kwargs = {
+                "model": model,
+                "messages": claude_messages,
+                "temperature": temperature,
+                "max_tokens": 16384,
+            }
+            if system_prompt:
+                kwargs["system"] = system_prompt
+            kwargs.update(_parse_extra_params(settings))
+            
+            response = client.messages.create(**kwargs)
+            content = response.content[0].text if response.content else ""
+            return {"content": content}
+        else:
+            # ========== OpenAI 兼容格式非流式调用 ==========
+            from openai import OpenAI
+            
+            if custom_base_url:
+                base_url = custom_base_url.rstrip('/')
+            elif provider == "DeepSeek":
+                base_url = "https://api.deepseek.com/v1"
+            elif provider == "OpenAI":
+                base_url = "https://api.openai.com/v1"
+            else:
+                base_url = "https://api.deepseek.com/v1"
+            
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+            
+            kwargs = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": 16384,
+            }
+            kwargs.update(_parse_extra_params(settings))
+            response = client.chat.completions.create(**kwargs)
+            
+            return {"content": response.choices[0].message.content}
+    
     except Exception as e:
         return {"error": f"API调用失败: {str(e)}"}
 

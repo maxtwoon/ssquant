@@ -209,6 +209,26 @@ class MultiSourceBacktester:
         data_lengths = [len(ds.data) for ds in multi_data_source.data_sources if not ds.data.empty]
         is_aligned = self.base_config.get('align_data', True)
         
+        if not data_lengths:
+            mode_hint = self.base_config.get('data_source_mode', 'data_server')
+            raise ValueError(
+                f"\n{'='*70}\n"
+                f"【无可用回测数据】当前数据模式: {mode_hint}\n"
+                f"{'='*70}\n"
+                f"\n请按以下步骤排查:\n"
+                f"\n1) 如果使用远程模式 (data_source_mode='data_server' 或不填):\n"
+                f"   - 确认 ssquant/config/trading_config.py 中俱乐部账号(API_USERNAME)和俱乐部密码(API_PASSWORD)已填写\n"
+                f"   - 或联系小松鼠 微信: viquant01 申请俱乐部会员\n"
+                f"\n2) 如果使用本地模式 (data_source_mode='local'):\n"
+                f"   - 先运行 examples/A_工具_导入数据库DB示例.py 将 CSV/Excel/JSON/Parquet/Feather/Pickle 数据导入\n"
+                f"   - 数据库位置: data_cache/backtest_data.db\n"
+                f"   - 表名格式: {{symbol}}_{{period}}_{{adjust}}  (如 rb888_5M_hfq)\n"
+                f"\n3) 通用检查:\n"
+                f"   - 确认 start_date / end_date 与数据实际范围匹配\n"
+                f"   - 确认 symbol / kline_period 与导入数据一致\n"
+                f"{'='*70}"
+            )
+        
         if is_aligned:
             # 对齐模式：所有数据源长度相同，用min获取
             total_length = min(data_lengths)
@@ -280,11 +300,27 @@ class MultiSourceBacktester:
             backtest_account_info['_last_order_rejected_for_funds'] = False
 
             # 更新所有数据源的当前索引
+            #
+            # 性能注记（P3 优化）：
+            #   原实现 row = ds.data.iloc[i] + row['close'] + ds.data.index[i]
+            #   每根 K 线触发 ~3 次 Pandas 标签索引（昂贵），在 line_profiler 中占主循环 ~12%。
+            #   set_data / align_data 之后 DataSource 已经把 close/LastPrice/Bid+Ask、
+            #   index 预转成了 numpy ndarray（_price_arr / _index_arr），主循环在这里
+            #   直接走 O(1) ndarray 下标即可，行为完全等价。
             for ds in multi_data_source.data_sources:
-                if not ds.data.empty and i < len(ds.data):
+                if ds._has_array_cache:
+                    if i < ds._data_len:
+                        ds.current_idx = i
+                        ds.current_price = float(ds._price_arr[i])
+                        # 走 _index_obj 而不是 _index_arr：保持 pd.Timestamp 返回类型，
+                        # 不改 trades 记录里 datetime 字段、也不改任何 log 字面输出。
+                        ds.current_datetime = ds._index_obj[i]
+                        ds._process_pending_orders(log_callback=self.logger.log_message)
+                    # 非对齐模式下，超出该数据源长度时保持最后状态
+                elif not ds.data.empty and i < len(ds.data):
+                    # 兜底慢路径：极少进入（例如还未调用 set_data 的早期路径，或非常规数据）
                     ds.current_idx = i
                     row = ds.data.iloc[i]
-                    # K线数据使用close，TICK数据使用LastPrice
                     if 'close' in row:
                         ds.current_price = row['close']
                     elif 'LastPrice' in row:
@@ -294,10 +330,7 @@ class MultiSourceBacktester:
                     else:
                         raise KeyError("数据中未找到价格字段（close/LastPrice/BidPrice1+AskPrice1）")
                     ds.current_datetime = ds.data.index[i]
-                    
-                    # 处理待执行的订单
                     ds._process_pending_orders(log_callback=self.logger.log_message)
-                # 非对齐模式下，数据源遍历完后保持最后状态（不更新current_idx）
             
             # 显示进度条（仅在非优化模式下显示）
             if not self._in_optimization_mode:
@@ -380,7 +413,13 @@ class MultiSourceBacktester:
                 self.logger.log_important(
                     "框架提示：本次回测最终没有成交记录，主要原因是开仓信号触发后被资金约束拦截。"
                 )
-        
+
+        # P7：关闭持久日志句柄。下一次 prepare_log_file 也会再保险关一次。
+        try:
+            self.logger.close()
+        except Exception:
+            pass
+
         return results
     
     def _update_backtest_account(self, account_info: dict, multi_data_source, symbol_configs: dict):
@@ -449,7 +488,18 @@ class MultiSourceBacktester:
             self._in_optimization_mode = True
         else:
             self._in_optimization_mode = False
-        
+
+        # initialize 参数兼容：run_backtest 内部用 strategy.initialize 属性触发初始化，
+        # 这里把外部传入的 initialize 函数挂到 strategy 对象上（仅当 strategy 还没有
+        # 自己的 initialize 属性时）。两条传参路径都生效，方便策略在 initialize 里
+        # 调 api.register_indicator 注册自定义指标。
+        if initialize is not None and not hasattr(strategy, 'initialize'):
+            try:
+                strategy.initialize = initialize
+            except (AttributeError, TypeError):
+                # 极少数 strategy 是不可扩展属性的对象（如 builtin），就跳过
+                pass
+
         # 运行回测逻辑
         results = self.run_backtest(strategy, strategy_params)
         

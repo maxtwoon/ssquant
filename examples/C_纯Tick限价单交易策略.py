@@ -46,30 +46,30 @@ def on_order(data):
 def strategy(api: StrategyAPI):
     """TICK驱动策略"""
     global g_tick_counter, g_pos, g_target_pos
-    
+
     tick = api.get_tick()
     if not tick:
         return
-        
+
     g_tick_counter += 1
-    
+
     # 每50个TICK尝试一次交易 (降低频率方便观察)
     if g_tick_counter % 50 != 0:
         return
-        
+
     # 获取盘口数据
     bid_price = tick.get('BidPrice1', 0)
     ask_price = tick.get('AskPrice1', 0)
     last_price = tick.get('LastPrice', 0)
-    
+
     if bid_price <= 0 or ask_price <= 0:
         return
-        
+
     api.log(f"\n[TICK #{g_tick_counter}] 最新:{last_price} 买一:{bid_price} 卖一:{ask_price}")
-    
+
     # 获取当前持仓
     current_pos = api.get_pos()
-    
+
     # 简单的多空交替逻辑
     if current_pos == 0:
         # 计划做多
@@ -78,74 +78,67 @@ def strategy(api: StrategyAPI):
         target_price = bid_price
         api.log(f">>> 尝试开多仓 (限价单)")
         api.log(f"    目标价格: {target_price} (当前买一价)")
-        
+
         # 【核心演示】发送限价单
         # 注意: 这里显式指定了 price，且没有指定 offset_ticks
         # 框架会识别为限价单
         api.buy(volume=1, price=target_price, reason="限价排队做多")
-        
+
     elif current_pos > 0:
         # 计划平多
         # 挂单策略: 挂在卖一价上 (排队等待成交)
         target_price = ask_price
         api.log(f">>> 尝试平多仓 (限价单)")
         api.log(f"    目标价格: {target_price} (当前卖一价)")
-        
+
         # 发送限价单
         api.sell(volume=1, price=target_price, reason="限价排队平多")
 
-
 if __name__ == "__main__":
     # ==================== 配置区域 ====================
-    RUN_MODE = RunMode.SIMNOW  # 建议使用SIMNOW观察限价单效果
+    # 运行模式: BACKTEST(回测) / SIMNOW(模拟盘) / REAL_TRADING(实盘交易)
+    RUN_MODE = RunMode.SIMNOW
     SYMBOL = 'au2602'          # 活跃合约
-    
+
     if RUN_MODE == RunMode.SIMNOW:
         config = get_config(RUN_MODE,
-            account='simnow_default',
-            server_name='电信1',
-            symbol=SYMBOL,
-            kline_period='tick',           # TICK模式
-            enable_tick_callback=True,     # 开启TICK回调
-            
-            # -------- 智能算法交易配置 --------
-            # 这里是本示例的核心:
-            # 1. 我们先发限价单去排队 (Maker)
-            # 2. 如果5秒没成交，触发超时 (order_timeout)
-            # 3. 撤单后，立即用超价单追单 (retry_offset_ticks)，确保成交 (Taker)
-            algo_trading=True,             # 开启智能交易
-            order_timeout=5,               # 5秒未成交自动撤单
-            retry_limit=3,                 # 撤单后重试3次
+            account='simnow_default', # 账户名（必须在 trading_config.py 的 ACCOUNTS 中定义）
+            server_name='电信1',      # SIMNOW 服务器: 电信1/电信2/移动/TEST/24hour
+            kline_source='local',              # K线源: 'local'(CTP本地聚合) 或 'data_server'(远程推送,需账号)
+            symbol=SYMBOL,          # 合约代码（支持 au2602, au888 等）
+            kline_period='tick',    # K线周期: 1m/5m/15m/30m/1h/1d
+            enable_tick_callback=True, # 是否启用逐Tick回调（高CPU占用）
+
+            algo_trading=True,      # 是否启用智能算法交易（超时重试/撤单重发）
+            order_timeout=5,        # 订单超时时间（秒），0=不启用
+            retry_limit=3,          # 订单失败最大重试次数
             retry_offset_ticks=5,          # 重试时: 对手价 + 5跳 (激进追单)
-            
-            # -------- 下单参数 --------
+
             order_offset_ticks=0,          # 默认偏移 (限价单模式下此参数被忽略)
-            preload_history=False,
-            
-            # -------- 数据窗口配置 --------
+            preload_history=False,  # 是否预加载历史K线（策略初始化前填充）
+
             lookback_bars=500,             # TICK回溯窗口 (0=不限制，策略get_ticks返回的最大条数)
         )
-    
+
     elif RUN_MODE == RunMode.REAL_TRADING:
         config = get_config(RUN_MODE,
-            account='real_default',
-            symbol=SYMBOL,
-            kline_period='tick',
-            enable_tick_callback=True,
-            
-            # 实盘配置 (更保守一点)
-            algo_trading=True,
-            order_timeout=10,              # 10秒超时
-            retry_limit=3,
-            retry_offset_ticks=5,          # 追单5跳
-            
-            order_offset_ticks=0,
-            preload_history=False,
-            
-            # -------- 数据窗口配置 --------
+            account='real_default', # 实盘账户名（必须在 trading_config.py 的 ACCOUNTS 中填写完整信息）
+            symbol=SYMBOL,          # 合约代码
+            kline_period='tick',    # K线周期
+            enable_tick_callback=True, # Tick回调
+
+            algo_trading=True,      # 智能算法交易
+            order_timeout=10,       # 订单超时（秒）
+            retry_limit=3,          # 最大重试次数
+            retry_offset_ticks=5,   # 重试超价跳数
+
+            order_offset_ticks=0,   # 委托偏移: 负值=价内挂单（低滑点），正值=超价（高成交率）
+            preload_history=False,  # 预加载历史K线
+
+            kline_source='data_server',              # K线源: 'local'(CTP本地聚合) 或 'data_server'(远程推送,需账号)
             lookback_bars=500,             # TICK回溯窗口 (0=不限制，策略get_ticks返回的最大条数)
         )
-        
+
     else:
         # 回测模式暂不演示限价单排队逻辑 (回测引擎通常假设立即成交)
         print("本示例建议在 SIMNOW 或 REAL_TRADING 模式下运行")
@@ -154,7 +147,7 @@ if __name__ == "__main__":
     # ==================== 运行 ====================
     runner = UnifiedStrategyRunner(mode=RUN_MODE)
     runner.set_config(config)
-    
+
     try:
         runner.run(
             strategy=strategy,

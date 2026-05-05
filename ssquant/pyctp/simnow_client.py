@@ -12,7 +12,7 @@ from typing import List, Dict, Callable, Optional
 from datetime import datetime
 
 from .md_api import MdApi, MdSpi
-from .trader_api import TraderApi, TraderSpi
+from .trader_api import TraderApi, TraderSpi, close_comb_offset_flag
 from .simnow_config import SIMNOWConfig
 
 
@@ -309,6 +309,8 @@ class SIMNOWTraderSpi(TraderSpi):
                         'InstrumentID': pOrder.InstrumentID,
                         'OrderRef': pOrder.OrderRef,
                         'OrderSysID': pOrder.OrderSysID,
+                        'FrontID': getattr(pOrder, 'FrontID', None),
+                        'SessionID': getattr(pOrder, 'SessionID', None),
                         'Direction': pOrder.Direction,
                         'CombOffsetFlag': pOrder.CombOffsetFlag,
                         'LimitPrice': pOrder.LimitPrice,
@@ -329,13 +331,15 @@ class SIMNOWTraderSpi(TraderSpi):
                 data = {
                     'InstrumentID': pOrder.InstrumentID,
                     'OrderRef': pOrder.OrderRef,
+                    'OrderSysID': pOrder.OrderSysID,
+                    'FrontID': getattr(pOrder, 'FrontID', None),
+                    'SessionID': getattr(pOrder, 'SessionID', None),
                     'Direction': pOrder.Direction,
                     'CombOffsetFlag': pOrder.CombOffsetFlag,
                     'LimitPrice': pOrder.LimitPrice,
                     'VolumeTotalOriginal': pOrder.VolumeTotalOriginal,
                     'VolumeTraded': pOrder.VolumeTraded,
                     'OrderStatus': pOrder.OrderStatus,
-                    'OrderSysID': pOrder.OrderSysID,
                     'InsertTime': pOrder.InsertTime,
                     'ExchangeID': pOrder.ExchangeID,  # 交易所代码
                     'StatusMsg': status_msg,
@@ -811,8 +815,7 @@ class SIMNOWClient:
             volume: 数量
             close_today: True=平今仓('3'), False=平昨仓('4')
         """
-        # 上期所需要明确区分平今/平昨，默认平今
-        offset_flag = '3' if close_today else '4'
+        offset_flag = close_comb_offset_flag(close_today, instrument_id)
         return self._send_order(instrument_id, '1', offset_flag, price, volume)
     
     def sell_open(self, instrument_id: str, price: float, volume: int):
@@ -829,8 +832,7 @@ class SIMNOWClient:
             volume: 数量
             close_today: True=平今仓('3'), False=平昨仓('4')
         """
-        # 上期所需要明确区分平今/平昨，默认平今
-        offset_flag = '3' if close_today else '4'
+        offset_flag = close_comb_offset_flag(close_today, instrument_id)
         return self._send_order(instrument_id, '0', offset_flag, price, volume)
     
     def _send_order(self, instrument_id: str, direction: str, offset_flag: str,

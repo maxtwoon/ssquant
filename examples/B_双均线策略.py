@@ -7,7 +7,6 @@
   3. 实盘   (REAL_TRADING)   — 连接真实 CTP 账户，真钱交易
 
 使用方式：只需修改下方「配置区」的 RUN_MODE 和对应的 get_config() 参数，策略逻辑完全不用改。
-
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 合约代码 symbol 怎么填
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -34,8 +33,8 @@
   不需要时：日内策略、短线策略保持 auto_roll_enabled=False 即可
 
   配置示例（在 get_config 中添加）：
-    auto_roll_enabled=True,       # 开启自动移仓
-    auto_roll_reopen=True,        # 平旧后自动在新主力开仓（False=只平不开）
+    auto_roll_enabled=True,         # 是否启用自动移仓（主力换月）
+    auto_roll_reopen=True,          # 移仓后是否在新主力补回仓位
     auto_roll_mode='simultaneous' # 'simultaneous'=同时平开  'sequential'=先平后开
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -64,14 +63,12 @@ from ssquant.api.strategy_api import StrategyAPI
 from ssquant.backtest.unified_runner import RunMode, UnifiedStrategyRunner
 from ssquant.config.trading_config import get_config
 
-
-# 全局变量
 g_tick_counter = 0
 
 def initialize(api: StrategyAPI):
     """
     策略初始化函数
-    
+
     Args:
         api: 策略API对象
     """
@@ -81,55 +78,43 @@ def initialize(api: StrategyAPI):
     verbose = api.get_param('verbose_kline', False)
     api.log(f"参数设置 - 快线: {fast_ma}, 慢线: {slow_ma}, 打印K线: {verbose}")
 
-
 def ma_cross_strategy(api: StrategyAPI):
     """
     双均线交叉策略
-    
+
     策略逻辑:
     - 短期均线上穿长期均线: 买入信号
     - 短期均线下穿长期均线: 卖出信号
-    
+
     运行模式:
     - 回测模式: 在K线完成时触发
     - 实盘模式: 启用TICK流双驱动，每个TICK都会触发，但交易仍使用K线数据
-    
+
     说明:
     虽然实盘模式下每个TICK都会触发此函数，但由于使用 order_type='next_bar_open'，
     实际下单和成交都在K线级别进行，不影响策略逻辑。
-    
+
     如需添加TICK级别功能（如实时止损），可以使用：
     tick = api.get_tick()  # 获取当前TICK数据
     if tick and api.get_pos() > 0:
         if tick['LastPrice'] < stop_loss_price:
             api.sell(order_type='market', reason='实时止损')
-    
+
     Args:
         api: 策略API对象
     """
     global g_tick_counter  # 声明使用全局变量
-    
-    # 获取TICK数据（实盘模式）
+
     tick = api.get_tick()
-    # print(f"💰 实时价格: {tick.get('LastPrice', 0):.2f} "
-    #     f"| 卖一:{tick.get('AskPrice1', 0):.2f} "
-    #     f"| 买一:{tick.get('BidPrice1', 0):.2f}")
-            
-    # 获取参数
+
     fast_ma = api.get_param('fast_ma', 2)
     slow_ma = api.get_param('slow_ma', 3)
-    
-    # 获取当前索引
+
     current_idx = api.get_idx()
     current_price = api.get_price()
     current_datetime = api.get_datetime()
 
-    #api.log(f"current_price: {current_price}, current_datetime: {current_datetime}")
-
-    #print("current_idx:",current_idx)
-
     klines = api.get_klines()
-    # 调试时打开 verbose_kline：打印最后一根 K（默认关闭，避免刷屏）
     """
     if api.get_param('verbose_kline', False):
         _last_bar = klines.iloc[-1]
@@ -155,13 +140,13 @@ def ma_cross_strategy(api: StrategyAPI):
     """
     if current_idx < slow_ma:
         return
-    
+
     # 获取收盘价和计算均线
     close = api.get_close()
     # 确保有足够的数据
     if len(close) < slow_ma:
         return
-    
+
     fast_ma_values = close.rolling(fast_ma).mean()
     slow_ma_values = close.rolling(slow_ma).mean()
     # print(fast_ma_values)
@@ -171,10 +156,9 @@ def ma_cross_strategy(api: StrategyAPI):
     # print("前一个快线:",fast_ma_values.iloc[-2])
     # print("前一个慢线:",slow_ma_values.iloc[-2])
 
-    
     # 获取当前持仓
     current_pos = api.get_pos()
-    
+
     # 均线金叉：快线上穿慢线
     if fast_ma_values.iloc[-2] <= slow_ma_values.iloc[-2] and fast_ma_values.iloc[-1] > slow_ma_values.iloc[-1]:
         if current_pos <= 0:
@@ -183,7 +167,7 @@ def ma_cross_strategy(api: StrategyAPI):
                 api.buycover(volume=1, order_type='next_bar_open')
             api.buy(volume=1, order_type='next_bar_open')
             api.log(f"均线金叉：快线({fast_ma_values.iloc[-1]:.2f})上穿慢线({slow_ma_values.iloc[-1]:.2f})，买入")
-    
+
     # 均线死叉：快线下穿慢线
     elif fast_ma_values.iloc[-2] >= slow_ma_values.iloc[-2] and fast_ma_values.iloc[-1] < slow_ma_values.iloc[-1]:
         if current_pos >= 0:
@@ -192,22 +176,22 @@ def ma_cross_strategy(api: StrategyAPI):
                 api.sell(order_type='next_bar_open')
             api.sellshort(volume=1, order_type='next_bar_open')
             api.log(f"均线死叉：快线({fast_ma_values.iloc[-1]:.2f})下穿慢线({slow_ma_values.iloc[-1]:.2f})，卖出")
-    
+
 # =====================================================================
 # 配置区（修改 RUN_MODE 与对应分支的 get_config 即可）
 # =====================================================================
 
 if __name__ == "__main__":
-    # ========== 运行模式 ==========
-    RUN_MODE = RunMode.BACKTEST  # 可选: RunMode.BACKTEST, RunMode.SIMNOW, RunMode.REAL_TRADING
-    
+    # 运行模式: BACKTEST(回测) / SIMNOW(模拟盘) / REAL_TRADING(实盘交易)
+    RUN_MODE = RunMode.BACKTEST
+
     # ========== 策略参数（会传入 initialize / strategy）==========
     strategy_params = {
-        'fast_ma': 2,
-        'slow_ma': 3,
+        'fast_ma': 20,
+        'slow_ma': 60,
         'verbose_kline': True,   # True=每根K打印最后一根OHLC（调试）；实盘建议 False
     }
-    
+
     # ========== 配置 ==========
     if RUN_MODE == RunMode.BACKTEST:
         # ==================== 回测配置 ====================
@@ -216,140 +200,88 @@ if __name__ == "__main__":
         #   方式B: 精确时间 → start_time + end_time（可精确到秒）
         #   方式C: 取最近N根 → limit
         config = get_config(RUN_MODE,
-            # -------- 合约与周期 --------
-            symbol='sc888',                   # 品种+888 = 主力连续合约（回测时用于拉取连续K线）
-            kline_period='1m',                # K线周期: '1m','5m','15m','30m','1h','4h','1d'
-            adjust_type='1',                  # 复权: '0'不复权  '1'后复权  '2'前复权
-            
-            # -------- 数据范围（三选一，可组合）--------
-            start_date='2026-3-20',           # 开始日期
-            end_date='2026-4-29',            # 结束日期
-            # start_time='2023-01-01 09:00:00',  # 或用精确时间
-            # end_time='2026-03-26 23:05:00',
-            # limit=50000,                       # 或取最近N根K线
-            
-            # -------- 回测参数 --------
-            initial_capital=1000000,           # 初始资金（元）
-            slippage_ticks=1,                  # 滑点（跳数），模拟真实成交偏差
-            # 合约乘数、最小变动价、手续费、保证金率 → 自动从远程获取，也可手动覆盖：
-            # price_tick=0.1,
-            # contract_multiplier=1000,
-            # commission=0.0001,
-            # margin_rate=0.1,
-            
-            # -------- 数据窗口 --------
-            lookback_bars=500,                 # 策略可回看的最大K线条数（0=不限制）
+            symbol='sc888',         # 合约代码（支持 au2602, au888 等）
+            kline_period='5m',      # K线周期: 1m/5m/15m/30m/1h/1d
+            adjust_type='1',        # 复权: '0'不复权, '1'后复权, '2'前复权
+
+            start_date='2022-3-20', # 回测开始日期
+            end_date='2026-4-29',   # 回测结束日期
+
+            initial_capital=1000000, # 初始资金（元）
+            slippage_ticks=1,       # 滑点跳数（每跳=price_tick）
+
+            lookback_bars=500,      # 回溯K线窗口（IndicatorCache预热用）
+            data_source_mode='data_server', # 'data_server'(远程,需API账号) 或 'local'(本地SQLite,无需账号) 注意:TICK回测必须用'local'
         )
-    
+
     elif RUN_MODE == RunMode.SIMNOW:
         # ==================== SIMNOW 模拟配置 ====================
         config = get_config(RUN_MODE,
-            # -------- 账户 --------
-            account='simnow_default',          # 对应 trading_config.py 中 ACCOUNTS 里的账户名
+            account='simnow_default', # 账户名（必须在 trading_config.py 的 ACCOUNTS 中定义）
+            kline_source='local',              # K线源: 'local'(CTP本地聚合) 或 'data_server'(远程推送,需账号)
             server_name='电信1',               # 行情/交易服务器: '电信1','电信2','移动','TEST'(盘后测试)
-            
-            # -------- 合约与周期 --------
-            # 合约代码写法：
-            #   sc888  → 主力合约（自动映射为当前主力月份，如 sc888→sc2507，直接用于CTP订阅和下单）
-            #   sc777  → 次主力合约（同理自动映射）
-            #   sc2507 → 指定月份（不做映射，直接使用）
-            symbol='sc888',
-            kline_period='1m',                 # K线周期: '1m','5m','15m','30m','1h','1d'
-            
-            # -------- K线数据来源 --------
-            # 'local'     = 用本地CTP行情Tick自行合成K线（默认，无需额外配置）
-            # 'data_server' = 从远程服务器接收K线推送（需在 trading_config.py 配置账号密码）
-            kline_source='data_server',
-            
-            # -------- 下单参数 --------
-            order_offset_ticks=-5,             # 委托偏移（跳数），正=超价买入，负=让价，确保成交用正值
-            
-            # -------- 算法交易（智能追单）--------
-            # 开启后，未成交的委托会自动撤单并以更优价格重新挂单
-            algo_trading=False,                # 是否启用
-            order_timeout=10,                  # 挂单超时自动撤单（秒）
-            retry_limit=3,                     # 最多重试几次
-            retry_offset_ticks=5,              # 每次重试加几跳（追价幅度）
-            
-            # -------- 自动移仓（主力合约换月）--------
-            # 开启后，当主力合约发生切换时，框架自动帮你：平掉旧主力仓位 → 在新主力上重新开仓
-            # 适合长期持仓策略，无需手动处理换月；短线策略一般不需要开启
-            auto_roll_enabled=False,           # 是否启用自动移仓
-            auto_roll_reopen=True,             # 平旧仓后是否自动在新主力上补开仓位
-            # auto_roll_mode='simultaneous',   # 移仓节奏: 'simultaneous'=同时发平旧+开新（默认，更快）
-                                               #           'sequential'=等旧仓平完再开新（更稳）
-            
-            # -------- 历史数据预加载 --------
-            # 开盘前先加载一批历史K线，让均线等指标一开盘就有值
-            preload_history=True,              # 是否预加载
-            history_lookback_bars=3000,        # 预加载多少根K线
-            adjust_type='1',                   # 复权: '0'不复权  '1'后复权  '2'前复权
-            
-            # -------- 数据窗口 --------
-            lookback_bars=5000,                # 策略可回看的最大K线条数（0=不限制）
-            
-            # -------- 回调模式 --------
-            enable_tick_callback=False,        # True=每个Tick都触发策略  False=每根K线完成时触发
-            
-            # -------- 数据保存 --------
-            save_kline_csv=False,              # 保存K线到CSV（路径: ./live_data/）
-            save_kline_db=True,                # 保存K线到数据库
-            save_tick_csv=False,               # 保存Tick到CSV
-            save_tick_db=False,                # 保存Tick到数据库
+
+            symbol='sc888',         # 合约代码（支持 au2602, au888 等）
+            kline_period='1m',      # K线周期: 1m/5m/15m/30m/1h/1d
+
+            order_offset_ticks=-5,  # 委托超价跳数（+10=对手价+10跳，确保成交）
+
+            algo_trading=False,     # 是否启用智能算法交易（超时重试/撤单重发）
+            order_timeout=10,       # 订单超时时间（秒），0=不启用
+            retry_limit=3,          # 订单失败最大重试次数
+            retry_offset_ticks=5,   # 重试时额外超价跳数
+
+            auto_roll_enabled=False, # 是否启用自动移仓（主力换月）
+            auto_roll_reopen=True,  # 移仓后是否在新主力补回仓位
+
+            preload_history=True,   # 是否预加载历史K线（策略初始化前填充）
+            history_lookback_bars=3000, # 预加载历史K线数量
+            adjust_type='1',        # 复权: '0'不复权, '1'后复权, '2'前复权
+
+            lookback_bars=5000,     # 回溯K线窗口（IndicatorCache预热用）
+
+            enable_tick_callback=False, # 是否启用逐Tick回调（高CPU占用）
+
+            save_kline_csv=False,   # 是否保存K线到CSV文件
+            save_kline_db=False,    # 是否保存K线到SQLite数据库
+            save_tick_csv=False,    # 是否保存Tick到CSV文件
+            save_tick_db=False,     # 是否保存Tick到SQLite数据库
         )
-    
+
     elif RUN_MODE == RunMode.REAL_TRADING:
         # ==================== 实盘配置 ====================
         # ⚠ 真金白银！上线前请务必：① 核对账户信息  ② 先用SIMNOW跑通  ③ 小资金试跑
         config = get_config(RUN_MODE,
-            # -------- 账户 --------
-            account='real_default',            # 对应 trading_config.py 中 ACCOUNTS 里的账户名
-            
-            # -------- 合约与周期 --------
-            # 合约代码写法（与SIMNOW相同）：
-            #   au888  → 主力合约（自动映射为当前主力月份，如 au888→au2508）
-            #   au777  → 次主力合约
-            #   au2508 → 指定月份（不映射）
-            symbol='au888',
-            kline_period='1m',                 # K线周期
-            
-            # -------- K线数据来源 --------
-            # 默认用本地CTP Tick合成K线；取消下行注释可改为远程推送
-            # kline_source='data_server',
-            
-            # -------- 下单参数 --------
-            order_offset_ticks=-10,            # 委托偏移（跳数）
-            
-            # -------- 算法交易（智能追单）--------
-            algo_trading=True,                 # 实盘建议开启，避免挂单不成交
-            order_timeout=10,                  # 挂单超时自动撤单（秒）
-            retry_limit=3,                     # 最多重试几次
-            retry_offset_ticks=5,              # 每次重试加几跳
-            
-            # -------- 自动移仓（主力合约换月）--------
-            # 开启后，主力切换时自动 平旧→开新，免去手动换月
-            auto_roll_enabled=False,           # 是否启用自动移仓
-            auto_roll_reopen=True,             # 平旧仓后是否自动在新主力上补开仓位
-            # auto_roll_mode='simultaneous',   # 'simultaneous'=同时平开  'sequential'=先平后开
-            
-            # -------- 历史数据预加载 --------
-            preload_history=True,
-            history_lookback_bars=100,
-            adjust_type='1',                   # 复权: '0'不复权  '1'后复权  '2'前复权
-            
-            # -------- 数据窗口 --------
-            lookback_bars=500,                 # 策略可回看的最大K线条数
-            
-            # -------- 回调模式 --------
-            enable_tick_callback=False,        # True=每个Tick触发  False=每根K线触发
-            
-            # -------- 数据保存 --------
-            save_kline_csv=False,
-            save_kline_db=False,
-            save_tick_csv=False,
-            save_tick_db=False,
+            account='real_default', # 实盘账户名（必须在 trading_config.py 的 ACCOUNTS 中填写完整信息）
+
+            symbol='au888',         # 合约代码
+            kline_period='1m',      # K线周期
+
+            order_offset_ticks=-10, # 委托偏移: 负值=价内挂单（低滑点），正值=超价（高成交率）
+
+            algo_trading=True,      # 智能算法交易
+            order_timeout=10,       # 订单超时（秒）
+            retry_limit=3,          # 最大重试次数
+            retry_offset_ticks=5,   # 重试超价跳数
+
+            auto_roll_enabled=False, # 自动移仓
+            auto_roll_reopen=True,  # 移仓补回仓位
+
+            preload_history=True,   # 预加载历史K线
+            history_lookback_bars=100, # 预加载K线数
+            adjust_type='1',        # 复权: '0'不复权, '1'后复权, '2'前复权
+
+            lookback_bars=500,      # 回溯窗口（IndicatorCache重算范围）
+
+            enable_tick_callback=False, # Tick回调
+
+            save_kline_csv=False,   # 保存K线CSV
+            save_kline_db=False,    # 保存K线DB
+            save_tick_csv=False,    # 保存Tick CSV
+            save_tick_db=False,     # 保存Tick DB
+            kline_source='data_server',              # K线源: 'local'(CTP本地聚合) 或 'data_server'(远程推送,需账号)
         )
-    
+
     # ========== 创建运行器并执行 ==========
     print("\n" + "="*80)
     print("双均线策略 - 统一运行版本")
@@ -359,13 +291,13 @@ if __name__ == "__main__":
     print(f"策略参数: 快线={strategy_params['fast_ma']}, 慢线={strategy_params['slow_ma']}, "
           f"verbose_kline={strategy_params.get('verbose_kline', False)}")
     print("="*80 + "\n")
-    
+
     # 创建运行器
     runner = UnifiedStrategyRunner(mode=RUN_MODE)
-    
+
     # 设置配置
     runner.set_config(config)
-    
+
     # 运行策略
     try:
         results = runner.run(
@@ -373,7 +305,7 @@ if __name__ == "__main__":
             initialize=initialize,
             strategy_params=strategy_params
         )
-    
+
     except KeyboardInterrupt:
         print("\n用户中断")
         runner.stop()
@@ -382,4 +314,3 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         runner.stop()
-

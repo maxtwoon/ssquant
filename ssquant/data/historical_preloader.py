@@ -24,7 +24,8 @@ class HistoricalDataPreloader:
     
     def preload(self, specific_contract: str, period: str, 
                 lookback_bars: int = 100, adjust_type: str = '0',
-                history_symbol: str = None) -> pd.DataFrame:
+                history_symbol: str = None,
+                kline_source: str = 'data_server') -> pd.DataFrame:
         """
         预加载历史数据（按K线数量加载）
         
@@ -80,9 +81,24 @@ class HistoricalDataPreloader:
         print(f"表名: {table_name}")
         print(f"加载K线数: {lookback_bars} 根")
         
-        # 3. K线数据：从 data_server 获取（服务端完成 1M→目标周期聚合）
-        #    （TICK 数据仍走本地数据库，因为 data_server 不提供 TICK）
+        # 3. K线数据预加载
+        #    TICK 数据仍走本地数据库（data_server 不提供 TICK）
         if period.lower() != 'tick':
+            # local 模式：直接从本地数据库读取，不走 data_server
+            if kline_source == 'local':
+                print(f"→ 【本地K线模式】跳过 data_server，直接从本地数据库读取...")
+                df = self._fallback_local_db(continuous_symbol, period, lookback_bars,
+                                             adjust_type, table_name)
+                if not df.empty:
+                    print(f"{'='*60}\n")
+                    return df
+                print(f"❌ 本地数据库无数据: {continuous_symbol} {period}")
+                print(f"  请先用 examples/A_工具_导入数据库DB示例.py 导入本地数据")
+                print(f"  支持格式: CSV / Excel / JSON / Parquet / Feather / Pickle")
+                print(f"{'='*60}\n")
+                return pd.DataFrame()
+            
+            # data_server 模式（默认）：从远程获取，失败后备本地
             print(f"→ 从 data_server 获取 {period.upper()} 数据...")
             df = self._fetch_from_data_server(continuous_symbol, period, lookback_bars, adjust_type)
             if not df.empty:
@@ -93,7 +109,7 @@ class HistoricalDataPreloader:
             
             # data_server 不可用时，回退到本地数据库
             print(f"⚠️ data_server 获取失败，尝试本地数据库回退...")
-            df = self._fallback_local_db(continuous_symbol, period, lookback_bars, 
+            df = self._fallback_local_db(continuous_symbol, period, lookback_bars,
                                          adjust_type, table_name)
             if not df.empty:
                 print(f"{'='*60}\n")

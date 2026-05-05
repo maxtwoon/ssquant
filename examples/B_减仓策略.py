@@ -15,7 +15,6 @@ import pandas as pd
 
 _state = {'bars_since_last_reduce': 0}
 
-
 def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
     delta = close.diff()
     gain = delta.clip(lower=0.0)
@@ -26,7 +25,6 @@ def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
     out = 100.0 - (100.0 / (1.0 + rs))
     return pd.to_numeric(out, errors='coerce')
 
-
 def initialize(api: StrategyAPI):
     api.log("=" * 60)
     api.log("减仓验证策略 初始化")
@@ -35,7 +33,6 @@ def initialize(api: StrategyAPI):
     api.log(f"  减仓间隔: {api.get_param('reduce_interval', 5)} 根K线")
     api.log(f"  RSI 超买/超卖: {api.get_param('rsi_overbought', 70)} / {api.get_param('rsi_oversold', 30)}")
     api.log("=" * 60)
-
 
 def scale_out_strategy(api: StrategyAPI):
     klines = api.get_klines(0)
@@ -113,10 +110,10 @@ def scale_out_strategy(api: StrategyAPI):
             api.buycover(volume=1, order_type='next_bar_open', index=0)
             _state['bars_since_last_reduce'] = 0
 
-
 if __name__ == "__main__":
     from ssquant.config.trading_config import get_config
 
+    # 运行模式: BACKTEST(回测) / SIMNOW(模拟盘) / REAL_TRADING(实盘交易)
     RUN_MODE = RunMode.BACKTEST
 
     strategy_params = {
@@ -130,15 +127,16 @@ if __name__ == "__main__":
 
     config = get_config(
         RUN_MODE,
-        symbol='rb888',
-        start_date='2025-01-01',
-        end_date='2026-03-30',
-        kline_period='15m',
-        adjust_type='1',
-        slippage_ticks=1,
-        initial_capital=100000,
-        lookback_bars=500,
-        debug=False,
+        symbol='rb888',             # 合约代码（支持 au2602, au888 等）
+        start_date='2025-01-01',    # 回测开始日期
+        end_date='2026-03-30',      # 回测结束日期
+        kline_period='15m',         # K线周期: 1m/5m/15m/30m/1h/1d
+        adjust_type='1',            # 复权: '0'不复权, '1'后复权, '2'前复权
+        slippage_ticks=1,           # 滑点跳数（每跳=price_tick）
+        initial_capital=100000,     # 初始资金（元）
+        lookback_bars=500,          # 回溯K线窗口（IndicatorCache预热用）
+        debug=False,                # 是否开启调试日志
+        data_source_mode='data_server', # 'data_server'(远程,需API账号) 或 'local'(本地SQLite,无需账号) 注意:TICK回测必须用'local'
     )
 
     print("\n" + "=" * 60)

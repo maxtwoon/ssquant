@@ -85,6 +85,31 @@ def _get_exchange_id(instrument_id: str) -> str:
     return ''  # 未知品种，不设置ExchangeID（让CTP自行判断）
 
 
+# 上期所与上海能源中心：必须严格区分「平今」与「平昨」
+# 其余交易所（中金所/大商所/郑商所/广期所）使用通用「平仓」，由 CTP 自行处理今昨
+_SHFE_INE_EXCHANGES = {'SHFE', 'INE'}
+
+
+def close_comb_offset_flag(close_today: bool, instrument_id: str) -> str:
+    """
+    根据交易所规则返回平仓组合开平标志。
+
+    - SHFE / INE：必须明确区分平今('3') / 平昨('4')
+    - 其它交易所：统一返回平仓('1')，由 CTP 内部按今昨匹配
+
+    Args:
+        close_today: True=优先平今, False=优先平昨
+        instrument_id: 合约代码，用于推导交易所
+
+    Returns:
+        CTP CombOffsetFlag 字符串：'1' / '3' / '4'
+    """
+    exch = _get_exchange_id(instrument_id)
+    if exch in _SHFE_INE_EXCHANGES:
+        return '3' if close_today else '4'
+    return '1'
+
+
 def decode_ctp_error(error_msg):
     """解码CTP错误消息"""
     if isinstance(error_msg, bytes):

@@ -239,14 +239,33 @@ class UnifiedStrategyRunner:
     
     def _run_backtest(self) -> Dict[str, Any]:
         """运行历史回测"""
-        # 鉴权检查
-        from ..data.auth_manager import verify_auth, get_auth_message, set_effective_data_server
-        set_effective_data_server(self.config.get('data_server'))
-        if not verify_auth():
-            raise RuntimeError(f"鉴权失败: {get_auth_message()}")
-        
         from ..config.trading_config import get_api_auth
         API_USERNAME, API_PASSWORD = get_api_auth()
+
+        data_source_mode = self.config.get('data_source_mode', 'data_server')
+        is_local_mode = data_source_mode == 'local'
+
+        # 远程模式下进行鉴权检查；本地模式跳过，避免 verify_auth() 缓存污染
+        if not is_local_mode:
+            from ..data.auth_manager import verify_auth, get_auth_message, set_effective_data_server
+            set_effective_data_server(self.config.get('data_server'))
+            if not verify_auth():
+                auth_msg = get_auth_message()
+                raise RuntimeError(
+                    f"\n{'='*70}\n"
+                    f"【当前数据模式: data_server】需要松鼠俱乐部会员账号才能从远程服务器拉取数据。\n"
+                    f"鉴权失败原因: {auth_msg}\n"
+                    f"{'='*70}\n"
+                    f"\n解决方案（二选一）:\n"
+                    f"\n1) 申请俱乐部会员并配置账号:\n"
+                    f"   联系小松鼠 微信: viquant01\n"
+                    f"   然后在 ssquant/config/trading_config.py 中填写俱乐部账号(API_USERNAME)和俱乐部密码(API_PASSWORD)\n"
+                    f"\n2) 切换到本地数据模式（无需会员）:\n"
+                    f"   在 get_config() 中将参数改为: data_source_mode='local'\n"
+                    f"   并确保已使用 examples/A_工具_导入数据库DB示例.py\n"
+                    f"   将数据导入 data_cache/backtest_data.db\n"
+                    f"{'='*70}"
+                )
         
         # 创建回测器
         self.backtester = MultiSourceBacktester()
@@ -305,6 +324,7 @@ class UnifiedStrategyRunner:
             'lookback_bars': lookback_bars,
             'debug': self.config.get('debug', False),
             'initial_capital': total_initial_capital,
+            'data_source_mode': data_source_mode,
         }
         if _per_ds_capitals is not None:
             _base_cfg['_per_ds_capitals'] = _per_ds_capitals

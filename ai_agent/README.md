@@ -49,8 +49,8 @@ ssquant-main/
 
 **配置俱乐部账号**：在 `ssquant/config/trading_config.py` 中填写：
 ```python
-API_USERNAME = "你的俱乐部账号"
-API_PASSWORD = "你的俱乐部密码"
+API_USERNAME = "你的俱乐部账号(手机号/邮箱)"
+API_PASSWORD = "你的俱乐部密码(注意：不是AI模型的API Key)"
 ```
 
 ### 1. 安装依赖
@@ -181,7 +181,7 @@ ssquant-main/                    # 项目根目录
 ## 常见问题
 
 ### Q: 提示"俱乐部鉴权失败"？
-1. 检查 `ssquant/config/trading_config.py` 中的 `API_USERNAME` 和 `API_PASSWORD` 是否正确
+1. 检查 `ssquant/config/trading_config.py` 中的俱乐部账号(`API_USERNAME`)和俱乐部密码(`API_PASSWORD`)是否正确
 2. 确保账号已开通 AI 助手权限
 3. 重启 AI Agent 服务
 

@@ -1115,6 +1115,14 @@
                         <input type="range" class="settings-input" id="settingTemp" min="0" max="2" step="0.1" value="0.7"
                                oninput="document.getElementById('tempValue').textContent = this.value">
                     </div>
+                    <div class="settings-item full-width">
+                        <label class="settings-label">额外参数 (JSON)</label>
+                        <textarea class="settings-input" id="settingExtraParams" rows="3" 
+                                  placeholder='例如: {&quot;reasoning_effort&quot;:&quot;high&quot;} 或 {&quot;thinking&quot;:{&quot;type&quot;:&quot;enabled&quot;,&quot;budget_tokens&quot;:16000}}'></textarea>
+                        <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px;">
+                            支持思考模式、推理强度等厂商特定参数，将直接透传给 API
+                        </small>
+                    </div>
                 </div>
             </div>
             <div class="modal-footer">
@@ -3084,6 +3092,7 @@ ${textContent}
                     document.getElementById('settingApiKey').value = data.ai_settings.api_key;
                     document.getElementById('settingTemp').value = data.ai_settings.temperature;
                     document.getElementById('tempValue').textContent = data.ai_settings.temperature;
+                    document.getElementById('settingExtraParams').value = data.ai_settings.extra_params || '';
                     
                     // 自动设置
                     autoSettings = {
@@ -3150,7 +3159,8 @@ ${textContent}
                     base_url: document.getElementById('settingBaseUrl').value.trim(),
                     model: document.getElementById('settingModel').value.trim(),
                     api_key: document.getElementById('settingApiKey').value,
-                    temperature: parseFloat(document.getElementById('settingTemp').value)
+                    temperature: parseFloat(document.getElementById('settingTemp').value),
+                    extra_params: document.getElementById('settingExtraParams').value.trim()
                 }
             };
             try {
@@ -3171,6 +3181,7 @@ ${textContent}
             document.getElementById('settingApiKey').value = '';
             document.getElementById('settingTemp').value = '0.7';
             document.getElementById('tempValue').textContent = '0.7';
+            document.getElementById('settingExtraParams').value = '';
         }
 
         // ==================== Auto Toggles ====================

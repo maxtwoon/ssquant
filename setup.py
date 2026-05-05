@@ -66,7 +66,7 @@ setup(
         'Repository': 'https://github.com/songshuquant/ssquant',
     },
 
-    license='Proprietary - Non-Commercial Use Only',
+    license='MIT',
     zip_safe=False,
 )
 

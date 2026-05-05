@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 from typing import Dict, List, Any, Optional, Union, Callable
 
 class StrategyAPI:
@@ -440,6 +441,133 @@ class StrategyAPI:
         if ds:
             return ds.get_volume()
         return pd.Series()
+
+    # ====== 方式二：NumPy 数组直读接口（零拷贝、不构造 Series） ======
+    # 与 get_close()/get_open()/... 语义完全一致，仅返回 ndarray 而非 pd.Series。
+    # 推荐在策略热路径里使用：rolling/iloc 改成 arr[-N:].mean() 之类，主循环
+    # strategy_func 段可加速 5-10×。回测和实盘共享同一接口，无未来数据泄漏。
+    def get_close_array(self, window: int = None, index: int = 0) -> np.ndarray:
+        """获取收盘价 ndarray 视图（零拷贝）。
+
+        Args:
+            window: 滑动窗口大小，None=使用 lookback_bars 配置，0=不限制
+            index: 数据源索引，默认 0
+
+        Returns:
+            截至当前 Bar 的 close ndarray（不含未来数据）
+        """
+        ds = self.get_data_source(index)
+        if ds:
+            return ds.get_close_array(window)
+        return np.empty(0, dtype=np.float64)
+
+    def get_open_array(self, window: int = None, index: int = 0) -> np.ndarray:
+        """获取开盘价 ndarray 视图（零拷贝）。"""
+        ds = self.get_data_source(index)
+        if ds:
+            return ds.get_open_array(window)
+        return np.empty(0, dtype=np.float64)
+
+    def get_high_array(self, window: int = None, index: int = 0) -> np.ndarray:
+        """获取最高价 ndarray 视图（零拷贝）。"""
+        ds = self.get_data_source(index)
+        if ds:
+            return ds.get_high_array(window)
+        return np.empty(0, dtype=np.float64)
+
+    def get_low_array(self, window: int = None, index: int = 0) -> np.ndarray:
+        """获取最低价 ndarray 视图（零拷贝）。"""
+        ds = self.get_data_source(index)
+        if ds:
+            return ds.get_low_array(window)
+        return np.empty(0, dtype=np.float64)
+
+    def get_volume_array(self, window: int = None, index: int = 0) -> np.ndarray:
+        """获取成交量 ndarray 视图（零拷贝）。"""
+        ds = self.get_data_source(index)
+        if ds:
+            return ds.get_volume_array(window)
+        return np.empty(0, dtype=np.float64)
+
+    # ====== 方式一：IndicatorCache 注册式 API（最高性能档位） ======
+    # 推荐用法（在 strategy.initialize(api) 钩子里一次性注册）：
+    #
+    #     def initialize(api):
+    #         api.register_indicator(
+    #             'sma_20',
+    #             lambda c, o, h, l, v: pd.Series(c).rolling(20).mean().to_numpy(),
+    #             window=20,
+    #         )
+    #
+    # 主循环里 O(1) 查询：
+    #
+    #     def strategy(api):
+    #         sma_now = api.get_indicator('sma_20')  # 标量 float
+    #         sma_arr = api.get_indicator_array('sma_20', window=2)  # 最近 2 根
+    @staticmethod
+    def _ensure_ds_supports_indicator_cache(ds, method_name: str):
+        """护栏：确保数据源实现了 IndicatorCache 接口。
+
+        v2 起 DataSource（回测）+ LiveDataSource（SIMNOW/实盘）均已实现。
+        若用户用了第三方/旧版数据源没有这些方法，抛清晰错误而不是裸 AttributeError。
+        """
+        if not hasattr(ds, method_name):
+            raise RuntimeError(
+                f"数据源 {type(ds).__name__} 未实现 IndicatorCache 接口 ({method_name})。"
+                f"请确认你使用的是 SSQuant 内置 DataSource（回测）或 LiveDataSource（实盘/SIMNOW），"
+                f"并升级到支持 IndicatorCache v2 的版本。"
+            )
+
+    def register_indicator(self, name: str, func: Callable,
+                           window: Optional[int] = None,
+                           index: int = 0) -> np.ndarray:
+        """注册一个自定义指标，引擎自动预计算 + 保持最新。
+
+        【三档统一可用】v2 起回测/SIMNOW/实盘均可使用：
+          - 回测：set_data() 后立即一次性预计算全量
+          - SIMNOW/实盘：每根新 K 线写入后基于 deque 全量重算（O(maxlen)，~ms 级）
+          - 数值与回测路径逐位等价（用户一份代码两边都能跑）
+
+        Args:
+            name: 指标名（同一数据源内唯一，重名覆盖）
+            func: 计算函数 func(close, open, high, low, volume) -> np.ndarray
+                  必须返回与输入等长的数组，可包含 NaN（前 N 根没法算的位置）
+            window: 该指标依赖的最大窗口（元信息，目前主要用于文档/调试）
+            index: 数据源索引
+
+        Returns:
+            np.ndarray: 当前缓存下预计算好的指标数组
+        """
+        ds = self.get_data_source(index)
+        if ds is None:
+            return np.empty(0, dtype=np.float64)
+        self._ensure_ds_supports_indicator_cache(ds, 'register_indicator')
+        return ds.register_indicator(name, func, window=window)
+
+    def unregister_indicator(self, name: str, index: int = 0) -> bool:
+        """移除一个已注册指标。"""
+        ds = self.get_data_source(index)
+        if ds is None:
+            return False
+        self._ensure_ds_supports_indicator_cache(ds, 'unregister_indicator')
+        return ds.unregister_indicator(name)
+
+    def get_indicator(self, name: str, index: int = 0) -> float:
+        """获取已注册指标在当前 Bar 的标量值，O(1)。"""
+        ds = self.get_data_source(index)
+        if ds is None:
+            return float('nan')
+        self._ensure_ds_supports_indicator_cache(ds, 'get_indicator')
+        return ds.get_indicator(name)
+
+    def get_indicator_array(self, name: str, window: int = None,
+                            index: int = 0) -> np.ndarray:
+        """获取已注册指标的最近 window 个值（ndarray 视图，零拷贝）。"""
+        ds = self.get_data_source(index)
+        if ds is None:
+            return np.empty(0, dtype=np.float64)
+        self._ensure_ds_supports_indicator_cache(ds, 'get_indicator_array')
+        return ds.get_indicator_array(name, window=window)
     
     def buy(self, volume: int = 1, reason: str = "", order_type: str = 'bar_close', index: int = 0, offset_ticks: Optional[int] = None, price: Optional[float] = None):
         """
