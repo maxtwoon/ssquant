@@ -212,7 +212,17 @@ pip install -e .
 
 > ⚠️ 不再支持 PyPI (`pip install ssquant`)，PyPI 仅保留弃用提示包，真实安装必须通过上述方式。
 
-### 2. 最小策略
+### 2. 配置账户（首次安装必填）
+
+安装完成后，打开 `ssquant/config/trading_config.py` 填写你的账户信息：
+
+- **俱乐部账号**（`API_USERNAME` / `API_PASSWORD`）：使用远程数据模式回测或实盘预加载时需要
+- **SIMNOW 账户**：仿真交易时需要
+- **实盘账户**（`broker_id` / `investor_id` / `password` / `md_server` / `td_server` / `app_id` / `auth_code`）：真实交易时需要
+
+> 俱乐部非会员可访问 [quant789.com](https://quant789.com) 或关注公众号 **松鼠Quant** 申请加入。
+
+### 3. 最小策略
 
 ```python
 from ssquant.api.strategy_api import StrategyAPI
@@ -237,7 +247,7 @@ if __name__ == "__main__":
     runner.run(strategy=strategy)
 ```
 
-### 3. 三模式切换（策略代码不改）
+### 4. 三模式切换（策略代码不改）
 
 ```python
 # 回测
