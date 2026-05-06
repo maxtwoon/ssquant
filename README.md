@@ -216,11 +216,11 @@ pip install -e .
 
 安装完成后，打开 `ssquant/config/trading_config.py` 填写你的账户信息：
 
-- **俱乐部账号**（`API_USERNAME` / `API_PASSWORD`）：使用远程数据模式回测或实盘预加载时需要
-- **SIMNOW 账户**：仿真交易时需要
-- **实盘账户**（`broker_id` / `investor_id` / `password` / `md_server` / `td_server` / `app_id` / `auth_code`）：真实交易时需要
+- **俱乐部账号**（`API_USERNAME` / `API_PASSWORD`）：使用**远程数据模式**（`data_server`）时需要。非会员用户可改用**本地数据模式**（`local`），导入本地数据后即可完整回测，功能不受限
+- **SIMNOW 账户**：仿真交易时需要，与会员身份无关
+- **实盘账户**（`broker_id` / `investor_id` / `password` / `md_server` / `td_server` / `app_id` / `auth_code`）：真实交易时需要，与会员身份无关
 
-> 俱乐部非会员可访问 [quant789.com](https://quant789.com) 或关注公众号 **松鼠Quant** 申请加入。
+> 本地数据模式完全免费，支持回测、TICK、任意周期聚合，功能与远程模式对等（仅数据需自行导入）。如需远程模式可访问 [quant789.com](https://quant789.com) 或关注公众号 **松鼠Quant** 申请俱乐部会员。
 
 ### 3. 最小策略
 
