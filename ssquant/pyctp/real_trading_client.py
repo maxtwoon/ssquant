@@ -71,14 +71,17 @@ class RealTradingMdSpi(MdSpi):
         
         self.logged_in = True
         print("[行情] 登录成功")
-        
+
         # 订阅行情
         if self.client.subscribe_list:
             self.client.md_api.subscribe_market_data(self.client.subscribe_list)
             print(f"[行情] 已订阅 {len(self.client.subscribe_list)} 个合约")
-        
+
         self.client._md_ready = True
         self.client._check_ready()
+
+        if self.client.on_md_login:
+            self.client.on_md_login()
     
     def OnRspSubMarketData(self, pSpecificInstrument, pRspInfo, nRequestID, bIsLast):
         """订阅行情响应"""
@@ -156,7 +159,7 @@ class RealTradingTraderSpi(TraderSpi):
     def get_next_order_ref(self) -> str:
         """获取下一个报单引用"""
         self.order_ref += 1
-        return str(self.order_ref)
+        return str(self.order_ref).zfill(12)
     
     def OnFrontConnected(self):
         """交易前置连接（首次连接或断线重连）"""
@@ -263,8 +266,14 @@ class RealTradingTraderSpi(TraderSpi):
         if pRspUserLogin:
             self.front_id = pRspUserLogin.FrontID
             self.session_id = pRspUserLogin.SessionID
+            # 从柜台返回的 MaxOrderRef 续号，避免同交易日重启后 OrderRef 与已有订单冲突被拒
+            try:
+                self.order_ref = int(pRspUserLogin.MaxOrderRef) if pRspUserLogin.MaxOrderRef else 0
+            except (ValueError, TypeError):
+                self.order_ref = 0
             print(f"[交易] 前置编号: {self.front_id}")
             print(f"[交易] 会话编号: {self.session_id}")
+            print(f"[交易] 起始报单引用: {self.order_ref}")
         
         # 确认结算单
         self.client.trader_api.settlement_info_confirm(
@@ -338,6 +347,7 @@ class RealTradingTraderSpi(TraderSpi):
                     'VolumeTotal': pOrder.VolumeTotal,
                     'OrderStatus': pOrder.OrderStatus,
                     'ExchangeID': pOrder.ExchangeID,  # 交易所代码
+                    'InsertTime': pOrder.InsertTime if hasattr(pOrder, 'InsertTime') else '',
                     'StatusMsg': status_msg,
                 }
                 self.client.on_order(data)
@@ -521,8 +531,10 @@ class RealTradingTraderSpi(TraderSpi):
             return
         
         if pOrder and self.client.on_query_order:
+            status_msg = self.client._clean_exchange_text(self._decode_error_msg(pOrder.StatusMsg)) if pOrder.StatusMsg else ""
             data = {
                 'InstrumentID': pOrder.InstrumentID,
+                'OrderRef': pOrder.OrderRef,
                 'OrderSysID': pOrder.OrderSysID,
                 'Direction': pOrder.Direction,
                 'CombOffsetFlag': pOrder.CombOffsetFlag,
@@ -533,6 +545,7 @@ class RealTradingTraderSpi(TraderSpi):
                 'OrderStatus': pOrder.OrderStatus,
                 'InsertDate': pOrder.InsertDate,
                 'InsertTime': pOrder.InsertTime,
+                'StatusMsg': status_msg,
             }
             self.client.on_query_order(data)
         
@@ -550,6 +563,7 @@ class RealTradingTraderSpi(TraderSpi):
         if pTrade and self.client.on_query_trade:
             data = {
                 'TradeID': pTrade.TradeID,
+                'OrderRef': pTrade.OrderRef,
                 'InstrumentID': pTrade.InstrumentID,
                 'Direction': pTrade.Direction,
                 'OffsetFlag': pTrade.OffsetFlag,
@@ -738,12 +752,26 @@ class RealTradingClient:
         self.on_query_order_complete: Optional[Callable] = None
         self.on_query_trade: Optional[Callable] = None
         self.on_query_trade_complete: Optional[Callable] = None
+        self.on_md_login: Optional[Callable] = None
         self.on_trader_ready: Optional[Callable] = None
         self.on_disconnected: Optional[Callable] = None
         
         # 内部持仓缓存（用于智能重试判断）
         # 格式: {instrument_id: {'long_yd': 0, 'short_yd': 0, 'long_today': 0, 'short_today': 0}}
         self._position_cache = {}
+
+        # 查询流控：CTP 规定查询类请求 1 秒最多 1 次，相邻调用间隔不够时补齐
+        self._last_query_ts = 0.0
+        self._query_lock = threading.Lock()
+
+    def _throttle_query(self, min_interval: float = 1.0):
+        """CTP 查询流控：仅补齐距上次查询不足的时间，避免每次无条件 sleep 阻塞策略线程"""
+        with self._query_lock:
+            now = time.time()
+            gap = now - self._last_query_ts
+            if gap < min_interval:
+                time.sleep(min_interval - gap)
+            self._last_query_ts = time.time()
     
     def is_connected(self):
         """检查是否已连接"""
@@ -781,7 +809,11 @@ class RealTradingClient:
         # 注册前置
         self.md_api.register_front(self.md_server)
         self.trader_api.register_front(self.td_server)
-        
+
+        # CTP 要求 Init() 之前必须订阅私有/公共流，否则部分柜台会触发栈破坏崩溃（0xC0000409）
+        self.trader_api.subscribe_private_topic(2)
+        self.trader_api.subscribe_public_topic(2)
+
         # 初始化
         self.md_api.init()
         self.trader_api.init()
@@ -886,7 +918,7 @@ class RealTradingClient:
     
     def query_account(self):
         """查询资金"""
-        time.sleep(1)  # 查询间隔
+        self._throttle_query()
         self.trader_api.qry_trading_account(self.broker_id, self.investor_id)
     
     def query_position(self, instrument_id: str = ""):
@@ -901,22 +933,36 @@ class RealTradingClient:
         else:
             # 查询全部，清空所有缓存
             self._position_cache.clear()
-        time.sleep(1)  # 查询间隔
+        self._throttle_query()
         self.trader_api.qry_investor_position(
             self.broker_id, self.investor_id, instrument_id
         )
-    
+
     def query_orders(self, instrument_id: str = ""):
         """查询订单"""
-        time.sleep(1)  # 查询间隔
+        self._throttle_query()
         self.trader_api.qry_order(
             self.broker_id, self.investor_id, instrument_id
         )
     
     def query_trades(self, instrument_id: str = ""):
         """查询成交"""
-        time.sleep(1)  # 查询间隔
+        self._throttle_query()
         self.trader_api.qry_trade(
             self.broker_id, self.investor_id, instrument_id
         )
+
+    # ========== 行情订阅（运行时动态订阅/退订） ==========
+
+    def subscribe(self, instruments: List[str]):
+        """动态订阅行情（需在行情登录后调用）"""
+        if not self._md_ready:
+            raise RuntimeError("行情尚未登录，无法订阅")
+        self.md_api.subscribe_market_data(instruments)
+
+    def unsubscribe(self, instruments: List[str]):
+        """取消订阅行情"""
+        if not self._md_ready:
+            raise RuntimeError("行情尚未登录，无法退订")
+        self.md_api.unsubscribe_market_data(instruments)
 
