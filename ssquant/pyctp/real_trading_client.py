@@ -15,6 +15,31 @@ from .md_api import MdApi, MdSpi
 from .trader_api import TraderApi, TraderSpi, close_comb_offset_flag
 
 
+def _swig_safe(fn):
+    """
+    SWIG director callback 兜底装饰器。
+
+    CTP 的 OnXxx 回调由 C++ 网络线程经 SWIG director 直接调用 Python。
+    一旦 Python 端抛出未捕获异常，异常经 SWIG 反弹回 C++ 线程会导致进程被系统
+    __fastfail 直接终止（Windows 下表现为 0xC0000409 / 静默退出，无 traceback）。
+
+    本装饰器把所有异常压在 Python 层吞掉并打印，CTP 线程恢复原状继续运行。
+    用户策略的 on_order / on_trade 等回调若有 bug，也不会把整个进程带走。
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            import traceback
+            print(f"[回调兜底] {fn.__name__} 异常已吞掉: {e}")
+            traceback.print_exc()
+            return None
+    return wrapper
+
+
 class RealTradingMdSpi(MdSpi):
     """实盘行情回调"""
     
@@ -24,6 +49,7 @@ class RealTradingMdSpi(MdSpi):
         self.connected = False
         self.logged_in = False
     
+    @_swig_safe
     def OnFrontConnected(self):
         """行情前置连接（首次连接或断线重连）"""
         was_disconnected = hasattr(self, '_was_connected') and self._was_connected
@@ -42,6 +68,7 @@ class RealTradingMdSpi(MdSpi):
             self.client.password
         )
     
+    @_swig_safe
     def OnFrontDisconnected(self, nReason: int):
         """行情连接断开 - CTP会自动重连"""
         self.connected = False
@@ -61,6 +88,7 @@ class RealTradingMdSpi(MdSpi):
         if self.client.on_disconnected:
             self.client.on_disconnected('md', nReason)
     
+    @_swig_safe
     def OnRspUserLogin(self, pRspUserLogin, pRspInfo, nRequestID, bIsLast):
         """行情登录响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
@@ -83,6 +111,7 @@ class RealTradingMdSpi(MdSpi):
         if self.client.on_md_login:
             self.client.on_md_login()
     
+    @_swig_safe
     def OnRspSubMarketData(self, pSpecificInstrument, pRspInfo, nRequestID, bIsLast):
         """订阅行情响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
@@ -92,6 +121,7 @@ class RealTradingMdSpi(MdSpi):
         else:
             print(f"[行情] 订阅成功: {pSpecificInstrument.InstrumentID}")
     
+    @_swig_safe
     def OnRtnDepthMarketData(self, pDepthMarketData):
         """行情推送"""
         if self.client.on_market_data:
@@ -161,6 +191,7 @@ class RealTradingTraderSpi(TraderSpi):
         self.order_ref += 1
         return str(self.order_ref).zfill(12)
     
+    @_swig_safe
     def OnFrontConnected(self):
         """交易前置连接（首次连接或断线重连）"""
         was_disconnected = hasattr(self, '_was_connected') and self._was_connected
@@ -182,6 +213,7 @@ class RealTradingTraderSpi(TraderSpi):
             self.client.auth_code
         )
     
+    @_swig_safe
     def OnFrontDisconnected(self, nReason: int):
         """交易连接断开 - CTP会自动重连"""
         self.connected = False
@@ -205,6 +237,7 @@ class RealTradingTraderSpi(TraderSpi):
         if self.client.on_disconnected:
             self.client.on_disconnected('trader', nReason)
     
+    @_swig_safe
     def OnRspAuthenticate(self, pRspAuthenticateField, pRspInfo, nRequestID, bIsLast):
         """认证响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
@@ -250,6 +283,7 @@ class RealTradingTraderSpi(TraderSpi):
         except Exception as e:
             print(f"[交易] 重试认证异常: {e}")
     
+    @_swig_safe
     def OnRspUserLogin(self, pRspUserLogin, pRspInfo, nRequestID, bIsLast):
         """交易登录响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
@@ -281,6 +315,7 @@ class RealTradingTraderSpi(TraderSpi):
             self.client.investor_id
         )
     
+    @_swig_safe
     def OnRspSettlementInfoConfirm(self, pSettlementInfoConfirm, pRspInfo, nRequestID, bIsLast):
         """结算单确认响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
@@ -297,6 +332,7 @@ class RealTradingTraderSpi(TraderSpi):
         if self.client.on_trader_ready:
             self.client.on_trader_ready()
     
+    @_swig_safe
     def OnRtnOrder(self, pOrder):
         """报单回报"""
         if pOrder:
@@ -352,6 +388,7 @@ class RealTradingTraderSpi(TraderSpi):
                 }
                 self.client.on_order(data)
     
+    @_swig_safe
     def OnRtnTrade(self, pTrade):
         """成交回报"""
         if pTrade:
@@ -385,6 +422,7 @@ class RealTradingTraderSpi(TraderSpi):
                         self.client.query_position(instrument_id)
                     threading.Thread(target=refresh, daemon=True).start()
     
+    @_swig_safe
     def OnRspOrderInsert(self, pInputOrder, pRspInfo, nRequestID, bIsLast):
         """报单错误"""
         if pRspInfo and pRspInfo.ErrorID != 0:
@@ -429,6 +467,7 @@ class RealTradingTraderSpi(TraderSpi):
             if self.client.on_order_error:
                 self.client.on_order_error(pRspInfo.ErrorID, full_msg, instrument_id)
     
+    @_swig_safe
     def OnRspOrderAction(self, pInputOrderAction, pRspInfo, nRequestID, bIsLast):
         """撤单请求响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
@@ -441,6 +480,7 @@ class RealTradingTraderSpi(TraderSpi):
             # 撤单请求已接受，等待报单状态变为'5'时才真正撤单成功
             print(f"[撤单] 请求已接受，等待确认...")
     
+    @_swig_safe
     def OnRspQryTradingAccount(self, pTradingAccount, pRspInfo, nRequestID, bIsLast):
         """资金查询响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
@@ -464,6 +504,7 @@ class RealTradingTraderSpi(TraderSpi):
             }
             self.client.on_account(data)
     
+    @_swig_safe
     def OnRspQryInvestorPosition(self, pInvestorPosition, pRspInfo, nRequestID, bIsLast):
         """持仓查询响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
@@ -522,6 +563,7 @@ class RealTradingTraderSpi(TraderSpi):
         if bIsLast and self.client.on_position_complete:
             self.client.on_position_complete()
     
+    @_swig_safe
     def OnRspQryOrder(self, pOrder, pRspInfo, nRequestID, bIsLast):
         """订单查询响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
@@ -552,6 +594,7 @@ class RealTradingTraderSpi(TraderSpi):
         if bIsLast and self.client.on_query_order_complete:
             self.client.on_query_order_complete()
     
+    @_swig_safe
     def OnRspQryTrade(self, pTrade, pRspInfo, nRequestID, bIsLast):
         """成交查询响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
