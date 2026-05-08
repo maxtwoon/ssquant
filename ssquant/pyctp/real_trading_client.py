@@ -25,6 +25,10 @@ def _swig_safe(fn):
 
     本装饰器把所有异常压在 Python 层吞掉并打印，CTP 线程恢复原状继续运行。
     用户策略的 on_order / on_trade 等回调若有 bug，也不会把整个进程带走。
+
+    阈值告警:同名回调异常累计达到 _SWIG_SAFE_PANIC_THRESHOLD 时,打印 CRITICAL
+    并触发 client.on_callback_panic(callback_name, count, last_exc_text)(若已设置)。
+    避免异常被无限静默吞掉、监控失明。
     """
     import functools
 
@@ -34,10 +38,34 @@ def _swig_safe(fn):
             return fn(*args, **kwargs)
         except Exception as e:
             import traceback
-            print(f"[回调兜底] {fn.__name__} 异常已吞掉: {e}")
+            # key 以 Spi 类名限定,避免 MdSpi/TraderSpi 同名回调(如 OnFrontConnected)共享计数位被串台
+            spi = args[0] if args else None
+            spi_cls = type(spi).__name__ if spi is not None else '<unknown>'
+            name = f"{spi_cls}.{fn.__name__}"
+            # MD/TD 是两个 CTP 网络线程,并发写入同一 dict;GIL 只保 get/set 单步,不保 get+set 组合
+            with _swig_safe_lock:
+                _swig_safe_counters[name] = _swig_safe_counters.get(name, 0) + 1
+                count = _swig_safe_counters[name]
+            print(f"[回调兜底] {name} 异常已吞掉 (累计{count}次): {e}")
             traceback.print_exc()
+            if count == _SWIG_SAFE_PANIC_THRESHOLD or (count > _SWIG_SAFE_PANIC_THRESHOLD and count % _SWIG_SAFE_PANIC_THRESHOLD == 0):
+                exc_text = f"{type(e).__name__}: {e}"
+                print(f"\n{'!'*60}\n[CRITICAL] 回调 {name} 异常累计 {count} 次,疑似真实 bug,请排查!\n{'!'*60}\n")
+                try:
+                    client = getattr(spi, 'client', None) if spi is not None else None
+                    cb = getattr(client, 'on_callback_panic', None) if client is not None else None
+                    if callable(cb):
+                        cb(name, count, exc_text)
+                except Exception as panic_exc:
+                    print(f"[回调兜底] on_callback_panic 自身也异常: {panic_exc}")
             return None
     return wrapper
+
+
+# @_swig_safe 全局异常计数 + 阈值(模块级,跨 Spi 共享) + 锁(MD/TD 并发 panic 下保计数不丢)
+_swig_safe_counters = {}
+_swig_safe_lock = threading.Lock()
+_SWIG_SAFE_PANIC_THRESHOLD = 10
 
 
 class RealTradingMdSpi(MdSpi):
@@ -55,19 +83,20 @@ class RealTradingMdSpi(MdSpi):
         was_disconnected = hasattr(self, '_was_connected') and self._was_connected
         self._was_connected = True
         self.connected = True
-        
+        self.client._bump_conn_epoch()
+
         if was_disconnected:
             print("[行情] ✅ 服务器重连成功！正在重新登录...")
         else:
             print("[行情] 已连接到服务器")
-        
+
         # 登录
         self.client.md_api.login(
             self.client.broker_id,
             self.client.investor_id,
             self.client.password
         )
-    
+
     @_swig_safe
     def OnFrontDisconnected(self, nReason: int):
         """行情连接断开 - CTP会自动重连"""
@@ -75,6 +104,7 @@ class RealTradingMdSpi(MdSpi):
         self.logged_in = False
         self.client._md_ready = False
         self.client._ready_event.clear()
+        self.client._bump_conn_epoch()
         
         reason_map = {
             0x1001: '网络读取失败',
@@ -92,8 +122,9 @@ class RealTradingMdSpi(MdSpi):
     def OnRspUserLogin(self, pRspUserLogin, pRspInfo, nRequestID, bIsLast):
         """行情登录响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
-            error_msg = self.client._decode_error_msg(pRspInfo.ErrorMsg)
-            full_msg = self.client._format_error_output(pRspInfo.ErrorID, error_msg)
+            # helper 定义在 TraderSpi 上,MdSpi 内部没有 —— 跨 Spi 走 client.trader_spi
+            error_msg = self.client.trader_spi._decode_error_msg(pRspInfo.ErrorMsg)
+            full_msg = self.client.trader_spi._format_error_output(pRspInfo.ErrorID, error_msg)
             print(f"[行情] 登录失败: {full_msg}")
             return
         
@@ -115,8 +146,9 @@ class RealTradingMdSpi(MdSpi):
     def OnRspSubMarketData(self, pSpecificInstrument, pRspInfo, nRequestID, bIsLast):
         """订阅行情响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
-            error_msg = self.client._decode_error_msg(pRspInfo.ErrorMsg)
-            full_msg = self.client._format_error_output(pRspInfo.ErrorID, error_msg)
+            # helper 定义在 TraderSpi 上,MdSpi 内部没有 —— 跨 Spi 走 client.trader_spi
+            error_msg = self.client.trader_spi._decode_error_msg(pRspInfo.ErrorMsg)
+            full_msg = self.client.trader_spi._format_error_output(pRspInfo.ErrorID, error_msg)
             print(f"[行情] 订阅失败: {full_msg}")
         else:
             print(f"[行情] 订阅成功: {pSpecificInstrument.InstrumentID}")
@@ -197,14 +229,15 @@ class RealTradingTraderSpi(TraderSpi):
         was_disconnected = hasattr(self, '_was_connected') and self._was_connected
         self._was_connected = True
         self.connected = True
-        
+        self.client._bump_conn_epoch()
+
         if was_disconnected:
             print(f"\n{'='*60}")
             print("[交易] ✅ 服务器重连成功！正在重新认证...")
             print(f"{'='*60}\n")
         else:
             print("[交易] 已连接到服务器")
-        
+
         # 产品认证
         self.client.trader_api.authenticate(
             self.client.broker_id,
@@ -212,14 +245,17 @@ class RealTradingTraderSpi(TraderSpi):
             self.client.app_id,
             self.client.auth_code
         )
-    
+
     @_swig_safe
     def OnFrontDisconnected(self, nReason: int):
         """交易连接断开 - CTP会自动重连"""
         self.connected = False
         self.logged_in = False
+        # 重连后从 3s 起重新退避,避免沿用上一次会话的高次数延迟
+        self._auth_retry_count = 0
         self.client._trader_ready = False
         self.client._ready_event.clear()
+        self.client._bump_conn_epoch()
         
         reason_map = {
             0x1001: '网络读取失败',
@@ -242,36 +278,45 @@ class RealTradingTraderSpi(TraderSpi):
         """认证响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-            full_msg = self.client._format_error_output(pRspInfo.ErrorID, error_msg)
+            full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
             print(f"[交易] 认证失败: {full_msg}")
-            
+
             # 认证失败后持续重试（服务器可能还未完全就绪，如收盘后CTP自动重连）
             retry_count = getattr(self, '_auth_retry_count', 0)
             self._auth_retry_count = retry_count + 1
             delay = min(3 * (retry_count + 1), 30)  # 3s, 6s, 9s, ... 最长30s
             print(f"[交易] {delay}秒后重试认证 (第{self._auth_retry_count}次)...")
-            import threading
-            threading.Timer(delay, self._retry_authenticate).start()
+            # 捕获当前连接纪元,Timer 醒来后会比对;若纪元已变(被新连接或断线取代),_retry_authenticate 自动作废。
+            # 读单个 int 在 CPython 下原子,无需持 _conn_epoch_lock (锁只保护 _bump_conn_epoch 的 read-modify-write)
+            scheduled_epoch = self.client._conn_epoch
+            threading.Timer(delay, self._retry_authenticate, args=[scheduled_epoch]).start()
             return
-        
+
         self._auth_retry_count = 0  # 认证成功，重置计数器
         print("[交易] 认证成功")
-        
-        # 登录
+        self._login()
+
+    def _login(self):
+        """向柜台发起登录请求。提取为方法便于与 simnow_client 对齐及重试复用。"""
         self.client.trader_api.login(
             self.client.broker_id,
             self.client.investor_id,
             self.client.password
         )
-    
-    def _retry_authenticate(self):
-        """重试交易认证"""
+
+    def _retry_authenticate(self, scheduled_epoch: int = -1):
+        """重试交易认证。scheduled_epoch 是排队时刻的连接纪元,若已变化说明连接状态已前进,作废。"""
+        # 纪元校验:任何一次新连接或断线都会让 epoch 递增,这里一比对就知道排队时刻的"那次连接"是否还在。
+        # 与 scheduled_epoch 捕获点一样,读 int 在 CPython 下原子,不需持锁。
+        if scheduled_epoch != -1 and scheduled_epoch != self.client._conn_epoch:
+            print(f"[交易] 重试认证作废(排队时纪元={scheduled_epoch}, 当前={self.client._conn_epoch}): 连接状态已变化")
+            return
         if not self.connected:
             print("[交易] 连接已断开，取消认证重试")
             return
         if self.logged_in:
             return
-        
+
         print("[交易] 正在重试认证...")
         try:
             self.client.trader_api.authenticate(
@@ -288,7 +333,7 @@ class RealTradingTraderSpi(TraderSpi):
         """交易登录响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-            full_msg = self.client._get_error_desc(pRspInfo.ErrorID, error_msg)
+            full_msg = self._get_error_desc(pRspInfo.ErrorID, error_msg)
             print(f"[交易] 登录失败: {full_msg}")
             return
         
@@ -301,10 +346,33 @@ class RealTradingTraderSpi(TraderSpi):
             self.front_id = pRspUserLogin.FrontID
             self.session_id = pRspUserLogin.SessionID
             # 从柜台返回的 MaxOrderRef 续号，避免同交易日重启后 OrderRef 与已有订单冲突被拒
-            try:
-                self.order_ref = int(pRspUserLogin.MaxOrderRef) if pRspUserLogin.MaxOrderRef else 0
-            except (ValueError, TypeError):
+            # 非空但非数值 = 协议异常,必须响亮报错 + 用时间戳种子保证新编号不会与旧的撞车
+            raw_max = pRspUserLogin.MaxOrderRef
+            if not raw_max:
                 self.order_ref = 0
+            else:
+                try:
+                    self.order_ref = int(raw_max)
+                except (ValueError, TypeError):
+                    safe_seed = int(time.time() * 1000) % 1_000_000_000
+                    # 计入 _swig_safe_counters,让阈值告警机制能跨多次登录累计,避免被视作孤立事件
+                    with _swig_safe_lock:
+                        _swig_safe_counters['__MaxOrderRef_parse__'] = _swig_safe_counters.get('__MaxOrderRef_parse__', 0) + 1
+                        count = _swig_safe_counters['__MaxOrderRef_parse__']
+                    print(f"\n{'!'*60}")
+                    print(f"[CRITICAL] MaxOrderRef 无法解析为数值: {raw_max!r} (累计{count}次)")
+                    print(f"[CRITICAL] 使用时间戳种子 {safe_seed} 作为起始引用,避免静默撞号")
+                    print(f"{'!'*60}\n")
+                    self.order_ref = safe_seed
+                    if self.client.on_callback_panic:
+                        try:
+                            self.client.on_callback_panic(
+                                'MaxOrderRef_parse',
+                                count,
+                                f"non-numeric MaxOrderRef={raw_max!r}, seeded={safe_seed}"
+                            )
+                        except Exception:
+                            pass
             print(f"[交易] 前置编号: {self.front_id}")
             print(f"[交易] 会话编号: {self.session_id}")
             print(f"[交易] 起始报单引用: {self.order_ref}")
@@ -320,7 +388,7 @@ class RealTradingTraderSpi(TraderSpi):
         """结算单确认响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-            full_msg = self.client._get_error_desc(pRspInfo.ErrorID, error_msg)
+            full_msg = self._get_error_desc(pRspInfo.ErrorID, error_msg)
             print(f"[交易] 结算单确认失败: {full_msg}")
             return
         
@@ -344,7 +412,7 @@ class RealTradingTraderSpi(TraderSpi):
                 
                 # 新版详细撤单回调
                 if self.client.on_cancel:
-                    status_msg = self.client._clean_exchange_text(self._decode_error_msg(pOrder.StatusMsg)) if pOrder.StatusMsg else ""
+                    status_msg = self._clean_exchange_text(self._decode_error_msg(pOrder.StatusMsg)) if pOrder.StatusMsg else ""
                     cancel_data = {
                         'InstrumentID': pOrder.InstrumentID,
                         'OrderRef': pOrder.OrderRef,
@@ -367,7 +435,7 @@ class RealTradingTraderSpi(TraderSpi):
             # 报单回调
             if self.client.on_order:
                 # 解码状态消息（可能是GBK编码）
-                status_msg = self.client._clean_exchange_text(self._decode_error_msg(pOrder.StatusMsg)) if pOrder.StatusMsg else ""
+                status_msg = self._clean_exchange_text(self._decode_error_msg(pOrder.StatusMsg)) if pOrder.StatusMsg else ""
                 
                 data = {
                     'OrderRef': pOrder.OrderRef,
@@ -415,9 +483,7 @@ class RealTradingTraderSpi(TraderSpi):
                     self.client._pending_position_refresh.discard(instrument_id)
                     print(f"[持仓刷新] 平昨成交，刷新 {instrument_id} 持仓...")
                     # 延迟一点再查询，确保成交处理完成
-                    import threading
                     def refresh():
-                        import time
                         time.sleep(0.5)  # 只需要短暂延迟
                         self.client.query_position(instrument_id)
                     threading.Thread(target=refresh, daemon=True).start()
@@ -427,7 +493,7 @@ class RealTradingTraderSpi(TraderSpi):
         """报单错误"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-            full_msg = self.client._format_error_output(pRspInfo.ErrorID, error_msg)
+            full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
             
             # 错误50：平今仓位不足 - 智能重试平昨（先检查是否有昨仓）
             if pRspInfo.ErrorID == 50 and pInputOrder:
@@ -472,7 +538,7 @@ class RealTradingTraderSpi(TraderSpi):
         """撤单请求响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-            full_msg = self.client._format_error_output(pRspInfo.ErrorID, error_msg)
+            full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
             print(f"[撤单] 请求失败: {full_msg}")
             if self.client.on_cancel_error:
                 self.client.on_cancel_error(pRspInfo.ErrorID, full_msg)
@@ -485,7 +551,7 @@ class RealTradingTraderSpi(TraderSpi):
         """资金查询响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-            full_msg = self.client._format_error_output(pRspInfo.ErrorID, error_msg)
+            full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
             print(f"[查询] 资金查询失败: {full_msg}")
             return
         
@@ -509,7 +575,7 @@ class RealTradingTraderSpi(TraderSpi):
         """持仓查询响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-            full_msg = self.client._format_error_output(pRspInfo.ErrorID, error_msg)
+            full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
             print(f"[持仓] 查询失败: {full_msg}")
             return
         
@@ -568,12 +634,12 @@ class RealTradingTraderSpi(TraderSpi):
         """订单查询响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-            full_msg = self.client._format_error_output(pRspInfo.ErrorID, error_msg)
+            full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
             print(f"[查询] 订单查询失败: {full_msg}")
             return
         
         if pOrder and self.client.on_query_order:
-            status_msg = self.client._clean_exchange_text(self._decode_error_msg(pOrder.StatusMsg)) if pOrder.StatusMsg else ""
+            status_msg = self._clean_exchange_text(self._decode_error_msg(pOrder.StatusMsg)) if pOrder.StatusMsg else ""
             data = {
                 'InstrumentID': pOrder.InstrumentID,
                 'OrderRef': pOrder.OrderRef,
@@ -599,7 +665,7 @@ class RealTradingTraderSpi(TraderSpi):
         """成交查询响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-            full_msg = self.client._format_error_output(pRspInfo.ErrorID, error_msg)
+            full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
             print(f"[查询] 成交查询失败: {full_msg}")
             return
         
@@ -734,10 +800,11 @@ class RealTradingClient:
         subscribe_list: Optional[List[str]] = None,
         md_flow_path: str = "./real_md_flow",
         td_flow_path: str = "./real_td_flow",
+        resume_mode: int = 2,
     ):
         """
         初始化实盘客户端
-        
+
         Args:
             broker_id: 期货公司BrokerID
             investor_id: 投资者账号
@@ -749,6 +816,9 @@ class RealTradingClient:
             subscribe_list: 订阅合约列表
             md_flow_path: 行情流文件路径
             td_flow_path: 交易流文件路径
+            resume_mode: 私有/公共流续传模式,传给 SubscribePrivate/PublicTopic
+                0=RESTART(重播当日全部), 1=RESUME(断点续传),
+                2=QUICK(仅收新消息,默认), 3=NONE(不接收)
         """
         self.broker_id = broker_id
         self.investor_id = investor_id
@@ -758,6 +828,7 @@ class RealTradingClient:
         self.app_id = app_id
         self.auth_code = auth_code
         self.subscribe_list = subscribe_list or []
+        self._resume_mode = resume_mode
         
         # 创建流文件目录
         os.makedirs(md_flow_path, exist_ok=True)
@@ -770,7 +841,7 @@ class RealTradingClient:
         # 创建 Spi
         self.md_spi = RealTradingMdSpi(self, self.md_api)
         self.trader_spi = RealTradingTraderSpi(self, self.trader_api)
-        
+
         # 注册回调
         self.md_api.register_spi(self.md_spi)
         self.trader_api.register_spi(self.trader_spi)
@@ -807,6 +878,15 @@ class RealTradingClient:
         self._last_query_ts = 0.0
         self._query_lock = threading.Lock()
 
+        # 连接纪元号:每次 OnFrontConnected / OnFrontDisconnected 递增,
+        # 用于让 _retry_authenticate 的 threading.Timer 能识别出"我排队的时候
+        # 的那次连接"是不是已经过期(被新连接或新断线取代),避免重连后重复认证。
+        self._conn_epoch = 0
+        self._conn_epoch_lock = threading.Lock()
+
+        # 回调兜底阈值触发的 panic 回调:on_callback_panic(name, count, exc_text)
+        self.on_callback_panic: Optional[Callable] = None
+
     def _throttle_query(self, min_interval: float = 1.0):
         """CTP 查询流控：仅补齐距上次查询不足的时间，避免每次无条件 sleep 阻塞策略线程"""
         with self._query_lock:
@@ -815,6 +895,13 @@ class RealTradingClient:
             if gap < min_interval:
                 time.sleep(min_interval - gap)
             self._last_query_ts = time.time()
+
+    def _bump_conn_epoch(self) -> int:
+        """递增连接纪元号并返回新值。任何 OnFrontConnected / OnFrontDisconnected 必须调用,
+        这样前一批 threading.Timer 排队的 _retry_authenticate 醒来后可以自检作废。"""
+        with self._conn_epoch_lock:
+            self._conn_epoch += 1
+            return self._conn_epoch
     
     def is_connected(self):
         """检查是否已连接"""
@@ -854,8 +941,9 @@ class RealTradingClient:
         self.trader_api.register_front(self.td_server)
 
         # CTP 要求 Init() 之前必须订阅私有/公共流，否则部分柜台会触发栈破坏崩溃（0xC0000409）
-        self.trader_api.subscribe_private_topic(2)
-        self.trader_api.subscribe_public_topic(2)
+        # resume_mode: 0=RESTART 1=RESUME 2=QUICK 3=NONE(默认 2,仅收新消息)
+        self.trader_api.subscribe_private_topic(self._resume_mode)
+        self.trader_api.subscribe_public_topic(self._resume_mode)
 
         # 初始化
         self.md_api.init()
@@ -908,16 +996,24 @@ class RealTradingClient:
         return self._send_order(instrument_id, '0', offset_flag, price, volume)
     
     def _send_order(self, instrument_id: str, direction: str, offset_flag: str,
-                    price: float, volume: int) -> str:
+                    price: float, volume: int) -> Optional[str]:
         """发送报单"""
         # 【关键修复】发送订单前检查连接状态
         if not self.is_ready():
-            print(f"❌ [下单失败] CTP客户端未就绪！")
-            print(f"   - 行情连接: {'已连接' if self.md_spi.connected else '已断开'}")
-            print(f"   - 行情登录: {'已登录' if self.md_spi.logged_in else '未登录'}")
-            print(f"   - 交易连接: {'已连接' if self.trader_spi.connected else '已断开'}")
-            print(f"   - 交易登录: {'已登录' if self.trader_spi.logged_in else '未登录'}")
+            reason = (
+                f"CTP客户端未就绪 - "
+                f"md连接={self.md_spi.connected}/登录={self.md_spi.logged_in}, "
+                f"trader连接={self.trader_spi.connected}/登录={self.trader_spi.logged_in}"
+            )
+            print(f"❌ [下单失败] {reason}")
             print(f"   - 合约: {instrument_id}, 价格: {price}, 数量: {volume}")
+            # 走 on_order_error 回调让策略监控通道能感知,不再仅 stdout 可见
+            # 使用自定义错误码 -1 区别于 CTP 柜台错误
+            if self.on_order_error:
+                try:
+                    self.on_order_error(-1, reason, instrument_id)
+                except Exception as cb_exc:
+                    print(f"[下单失败] on_order_error 回调自身异常: {cb_exc}")
             return None
         
         order_ref = self.trader_spi.get_next_order_ref()

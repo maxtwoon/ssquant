@@ -26,6 +26,10 @@ def _swig_safe(fn):
 
     本装饰器把所有异常压在 Python 层吞掉并打印，CTP 线程恢复原状继续运行。
     用户策略的 on_order / on_trade 等回调若有 bug，也不会把整个进程带走。
+
+    阈值告警:同名回调异常累计达到 _SWIG_SAFE_PANIC_THRESHOLD 时,打印 CRITICAL
+    并触发 client.on_callback_panic(callback_name, count, last_exc_text)(若已设置)。
+    避免异常被无限静默吞掉、监控失明。
     """
     import functools
 
@@ -35,10 +39,34 @@ def _swig_safe(fn):
             return fn(*args, **kwargs)
         except Exception as e:
             import traceback
-            print(f"[回调兜底] {fn.__name__} 异常已吞掉: {e}")
+            # key 以 Spi 类名限定,避免 MdSpi/TraderSpi 同名回调(如 OnFrontConnected)共享计数位被串台
+            spi = args[0] if args else None
+            spi_cls = type(spi).__name__ if spi is not None else '<unknown>'
+            name = f"{spi_cls}.{fn.__name__}"
+            # MD/TD 是两个 CTP 网络线程,并发写入同一 dict;GIL 只保 get/set 单步,不保 get+set 组合
+            with _swig_safe_lock:
+                _swig_safe_counters[name] = _swig_safe_counters.get(name, 0) + 1
+                count = _swig_safe_counters[name]
+            print(f"[回调兜底] {name} 异常已吞掉 (累计{count}次): {e}")
             traceback.print_exc()
+            if count == _SWIG_SAFE_PANIC_THRESHOLD or (count > _SWIG_SAFE_PANIC_THRESHOLD and count % _SWIG_SAFE_PANIC_THRESHOLD == 0):
+                exc_text = f"{type(e).__name__}: {e}"
+                print(f"\n{'!'*60}\n[CRITICAL] 回调 {name} 异常累计 {count} 次,疑似真实 bug,请排查!\n{'!'*60}\n")
+                try:
+                    client = getattr(spi, 'client', None) if spi is not None else None
+                    cb = getattr(client, 'on_callback_panic', None) if client is not None else None
+                    if callable(cb):
+                        cb(name, count, exc_text)
+                except Exception as panic_exc:
+                    print(f"[回调兜底] on_callback_panic 自身也异常: {panic_exc}")
             return None
     return wrapper
+
+
+# @_swig_safe 全局异常计数 + 阈值(模块级,跨 Spi 共享) + 锁(MD/TD 并发 panic 下保计数不丢)
+_swig_safe_counters = {}
+_swig_safe_lock = threading.Lock()
+_SWIG_SAFE_PANIC_THRESHOLD = 10
 
 
 class SIMNOWMdSpi(MdSpi):
@@ -56,14 +84,15 @@ class SIMNOWMdSpi(MdSpi):
         # 判断是否是重连
         was_disconnected = hasattr(self, '_was_connected') and self._was_connected
         self._was_connected = True
-        
+
         self.connected = True
-        
+        self.client._bump_conn_epoch()
+
         if was_disconnected:
             print(f"[{self._timestamp()}] [行情] ✅ 服务器重连成功！正在重新登录...")
         else:
             print(f"[{self._timestamp()}] [行情] 服务器已连接")
-        
+
         # 自动登录
         if self.client.investor_id and self.client.password:
             self.api.login(
@@ -71,12 +100,13 @@ class SIMNOWMdSpi(MdSpi):
                 self.client.investor_id,
                 self.client.password
             )
-    
+
     @_swig_safe
     def OnFrontDisconnected(self, nReason: int):
         """连接断开 - CTP会自动重连"""
         self.connected = False
         self.logged_in = False
+        self.client._bump_conn_epoch()
         
         reason_map = {
             0x1001: '网络读取失败',
@@ -96,8 +126,9 @@ class SIMNOWMdSpi(MdSpi):
     def OnRspUserLogin(self, pRspUserLogin, pRspInfo, nRequestID: int, bIsLast: bool):
         """登录响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
-            error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-            full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
+            # helper 定义在 SIMNOWTraderSpi 上，MdSpi 自身没有 —— 走 client.trader_spi 调用
+            error_msg = self.client.trader_spi._decode_error_msg(pRspInfo.ErrorMsg)
+            full_msg = self.client.trader_spi._format_error_output(pRspInfo.ErrorID, error_msg)
             print(f"[{self._timestamp()}] [行情] 登录失败: {full_msg}")
             return
         
@@ -121,8 +152,9 @@ class SIMNOWMdSpi(MdSpi):
     def OnRspSubMarketData(self, pSpecificInstrument, pRspInfo, nRequestID: int, bIsLast: bool):
         """订阅行情响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
-            error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-            full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
+            # helper 定义在 SIMNOWTraderSpi 上，MdSpi 自身没有 —— 走 client.trader_spi 调用
+            error_msg = self.client.trader_spi._decode_error_msg(pRspInfo.ErrorMsg)
+            full_msg = self.client.trader_spi._format_error_output(pRspInfo.ErrorID, error_msg)
             print(f"[{self._timestamp()}] [行情] 订阅失败: {full_msg}")
         else:
             if pSpecificInstrument:
@@ -196,9 +228,10 @@ class SIMNOWTraderSpi(TraderSpi):
         # 判断是否是重连
         was_disconnected = hasattr(self, '_was_connected') and self._was_connected
         self._was_connected = True
-        
+
         self.connected = True
-        
+        self.client._bump_conn_epoch()
+
         if was_disconnected:
             print(f"\n{'='*60}")
             print(f"[{self._timestamp()}] [交易] ✅ 服务器重连成功！正在重新登录...")
@@ -224,8 +257,9 @@ class SIMNOWTraderSpi(TraderSpi):
         """连接断开 - 自动重连"""
         self.connected = False
         self.logged_in = False
-        
-        # 打印详细的断开原因
+        # 重连后从 3s 起重新退避,避免沿用上一次会话的高次数延迟
+        self._auth_retry_count = 0
+        self.client._bump_conn_epoch()
         reason_map = {
             0x1001: '网络读取失败',
             0x1002: '网络写入失败', 
@@ -255,28 +289,34 @@ class SIMNOWTraderSpi(TraderSpi):
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
             full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
             print(f"[{self._timestamp()}] [交易] 认证失败: {full_msg}")
-            
+
             # 认证失败后持续重试（服务器可能还未完全就绪，如收盘后CTP自动重连）
             retry_count = getattr(self, '_auth_retry_count', 0)
             self._auth_retry_count = retry_count + 1
             delay = min(3 * (retry_count + 1), 30)  # 3s, 6s, 9s, ... 最长30s
             print(f"[{self._timestamp()}] [交易] {delay}秒后重试认证 (第{self._auth_retry_count}次)...")
-            import threading
-            threading.Timer(delay, self._retry_authenticate).start()
+            # 捕获当前连接纪元,Timer 醒来后会比对;若纪元已变(被新连接或断线取代),_retry_authenticate 自动作废。
+            # 读单个 int 在 CPython 下原子,无需持 _conn_epoch_lock (锁只保护 _bump_conn_epoch 的 read-modify-write)
+            scheduled_epoch = self.client._conn_epoch
+            threading.Timer(delay, self._retry_authenticate, args=[scheduled_epoch]).start()
             return
-        
+
         self._auth_retry_count = 0  # 认证成功，重置计数器
         print(f"[{self._timestamp()}] [交易] 认证成功")
         self._login()
-    
-    def _retry_authenticate(self):
-        """重试交易认证"""
+
+    def _retry_authenticate(self, scheduled_epoch: int = -1):
+        """重试交易认证。scheduled_epoch 是排队时刻的连接纪元,若已变化说明连接状态已前进,作废。"""
+        # 读单个 int 在 CPython 下原子,不需持 _conn_epoch_lock (锁只保护 _bump_conn_epoch 的 read-modify-write)
+        if scheduled_epoch != -1 and scheduled_epoch != self.client._conn_epoch:
+            print(f"[{self._timestamp()}] [交易] 重试认证作废(排队时纪元={scheduled_epoch}, 当前={self.client._conn_epoch}): 连接状态已变化")
+            return
         if not self.connected:
             print(f"[{self._timestamp()}] [交易] 连接已断开，取消认证重试")
             return
         if self.logged_in:
             return  # 已经登录了，无需重试
-        
+
         print(f"[{self._timestamp()}] [交易] 正在重试认证...")
         try:
             self.api.authenticate(
@@ -303,8 +343,34 @@ class SIMNOWTraderSpi(TraderSpi):
         if pRspUserLogin:
             self.front_id = pRspUserLogin.FrontID
             self.session_id = pRspUserLogin.SessionID
-            self.order_ref = int(pRspUserLogin.MaxOrderRef) if pRspUserLogin.MaxOrderRef else 0
-            
+            # 非空但非数值 = 协议异常,必须响亮报错 + 用时间戳种子保证新编号不会撞老编号
+            raw_max = pRspUserLogin.MaxOrderRef
+            if not raw_max:
+                self.order_ref = 0
+            else:
+                try:
+                    self.order_ref = int(raw_max)
+                except (ValueError, TypeError):
+                    safe_seed = int(time.time() * 1000) % 1_000_000_000
+                    # 计入 _swig_safe_counters,让阈值告警机制能跨多次登录累计,避免被视作孤立事件
+                    with _swig_safe_lock:
+                        _swig_safe_counters['__MaxOrderRef_parse__'] = _swig_safe_counters.get('__MaxOrderRef_parse__', 0) + 1
+                        count = _swig_safe_counters['__MaxOrderRef_parse__']
+                    print(f"\n{'!'*60}")
+                    print(f"[CRITICAL] MaxOrderRef 无法解析为数值: {raw_max!r} (累计{count}次)")
+                    print(f"[CRITICAL] 使用时间戳种子 {safe_seed} 作为起始引用,避免静默撞号")
+                    print(f"{'!'*60}\n")
+                    self.order_ref = safe_seed
+                    if self.client.on_callback_panic:
+                        try:
+                            self.client.on_callback_panic(
+                                'MaxOrderRef_parse',
+                                count,
+                                f"non-numeric MaxOrderRef={raw_max!r}, seeded={safe_seed}"
+                            )
+                        except Exception:
+                            pass
+
             print(f"[{self._timestamp()}] [交易] 交易日: {pRspUserLogin.TradingDay}")
             print(f"[{self._timestamp()}] [交易] 前置编号: {self.front_id}")
             print(f"[{self._timestamp()}] [交易] 会话编号: {self.session_id}")
@@ -408,9 +474,7 @@ class SIMNOWTraderSpi(TraderSpi):
                     self.client._pending_position_refresh.discard(instrument_id)
                     print(f"[{self._timestamp()}] [持仓刷新] 平昨成交，刷新 {instrument_id} 持仓...")
                     # 延迟一点再查询，确保成交处理完成
-                    import threading
                     def refresh():
-                        import time
                         time.sleep(0.5)  # 只需要短暂延迟
                         self.client.query_position(instrument_id)
                     threading.Thread(target=refresh, daemon=True).start()
@@ -737,7 +801,8 @@ class SIMNOWClient:
     
     def __init__(self, investor_id: str, password: str, server_name: str = '24hour',
                  subscribe_list: Optional[List] = None, md_flow_path: str = "simnow_md_flow/",
-                 td_flow_path: str = "simnow_td_flow/"):
+                 td_flow_path: str = "simnow_td_flow/",
+                 resume_mode: int = 2):
         """
         初始化SIMNOW客户端
         :param investor_id: 投资者账号
@@ -746,11 +811,13 @@ class SIMNOWClient:
         :param subscribe_list: 订阅合约列表
         :param md_flow_path: 行情流文件路径
         :param td_flow_path: 交易流文件路径
+        :param resume_mode: 私有/公共流续传模式 0=RESTART 1=RESUME 2=QUICK(默认) 3=NONE
         """
         # 账号信息
         self.investor_id = investor_id
         self.password = password
         self.subscribe_list = subscribe_list or []
+        self._resume_mode = resume_mode
         
         # 获取服务器配置
         config = SIMNOWConfig()
@@ -799,7 +866,16 @@ class SIMNOWClient:
         # 内部持仓缓存（用于智能重试判断）
         # 格式: {instrument_id: {'long_yd': 0, 'short_yd': 0, 'long_today': 0, 'short_today': 0}}
         self._position_cache = {}
-        
+
+        # 连接纪元号:每次 OnFrontConnected / OnFrontDisconnected 递增,
+        # 用于让 _retry_authenticate 的 threading.Timer 识别排队时刻的连接是否已过期,
+        # 避免重连后重复认证。
+        self._conn_epoch = 0
+        self._conn_epoch_lock = threading.Lock()
+
+        # 回调兜底阈值触发的 panic 回调:on_callback_panic(name, count, exc_text)
+        self.on_callback_panic: Optional[Callable] = None
+
         print(f"[初始化] SIMNOW客户端")
         print(f"[初始化] 服务器: {server.name} - {server.description}")
         print(f"[初始化] 账号: {investor_id}")
@@ -816,8 +892,9 @@ class SIMNOWClient:
         
         # 注册交易SPI和前置
         self.trader_api.register_spi(self.trader_spi)
-        self.trader_api.subscribe_private_topic(2)
-        self.trader_api.subscribe_public_topic(2)
+        # resume_mode: 0=RESTART 1=RESUME 2=QUICK(默认) 3=NONE
+        self.trader_api.subscribe_private_topic(self._resume_mode)
+        self.trader_api.subscribe_public_topic(self._resume_mode)
         self.trader_api.register_front(self.server.trader_front)
         
         # 初始化
@@ -834,6 +911,13 @@ class SIMNOWClient:
     def is_ready(self):
         """检查是否就绪（已登录）"""
         return self.md_spi.logged_in and self.trader_spi.logged_in
+
+    def _bump_conn_epoch(self) -> int:
+        """递增连接纪元号并返回新值。任何 OnFrontConnected / OnFrontDisconnected 必须调用,
+        这样前一批 threading.Timer 排队的 _retry_authenticate 醒来后可以自检作废。"""
+        with self._conn_epoch_lock:
+            self._conn_epoch += 1
+            return self._conn_epoch
     
     def wait_ready(self, timeout: int = 30):
         """等待就绪"""
@@ -883,12 +967,20 @@ class SIMNOWClient:
         """发送报单"""
         # 【关键修复】发送订单前检查连接状态
         if not self.is_ready():
-            print(f"❌ [下单失败] CTP客户端未就绪！")
-            print(f"   - 行情连接: {'已连接' if self.md_spi.connected else '已断开'}")
-            print(f"   - 行情登录: {'已登录' if self.md_spi.logged_in else '未登录'}")
-            print(f"   - 交易连接: {'已连接' if self.trader_spi.connected else '已断开'}")
-            print(f"   - 交易登录: {'已登录' if self.trader_spi.logged_in else '未登录'}")
+            reason = (
+                f"CTP客户端未就绪 - "
+                f"md连接={self.md_spi.connected}/登录={self.md_spi.logged_in}, "
+                f"trader连接={self.trader_spi.connected}/登录={self.trader_spi.logged_in}"
+            )
+            print(f"❌ [下单失败] {reason}")
             print(f"   - 合约: {instrument_id}, 价格: {price}, 数量: {volume}")
+            # 走 on_order_error 回调让策略监控通道能感知,不再仅 stdout 可见
+            # 使用自定义错误码 -1 区别于 CTP 柜台错误
+            if self.on_order_error:
+                try:
+                    self.on_order_error(-1, reason, instrument_id)
+                except Exception as cb_exc:
+                    print(f"[下单失败] on_order_error 回调自身异常: {cb_exc}")
             return None
         
         order_ref = self.trader_spi.get_next_order_ref()
