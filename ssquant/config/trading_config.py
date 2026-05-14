@@ -19,7 +19,6 @@ API_PASSWORD = ""            # 俱乐部密码 (注意：不是AI模型的API Ke
 #   - adjust_type: '0'=不复权, '1'=后复权, '2'=前复权
 ENABLE_REMOTE_ADJUST = True
 
-
 # ========== 回测默认配置 ==========
 BACKTEST_DEFAULTS = {
     # -------- 资金配置 --------
@@ -211,3 +210,13 @@ def set_api_auth(username: str, password: str):
     global API_USERNAME, API_PASSWORD
     API_USERNAME = username
     API_PASSWORD = password
+
+
+def add_account(name: str, **config):
+    """添加账户"""
+    ACCOUNTS[name] = config
+
+
+def list_accounts():
+    """列出所有账户"""
+    return list(ACCOUNTS.keys())
