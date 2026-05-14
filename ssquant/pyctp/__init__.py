@@ -5,7 +5,7 @@ Python CTP API 封装
 提供更友好的Python接口用于访问CTP行情和交易API
 """
 
-__version__ = '0.3.0'
+__version__ = '0.4.2'
 __author__ = 'SSQuant Team'
 
 from .md_api import MdApi

@@ -3,10 +3,12 @@ CTP动态加载器 - 自动匹配当前Python版本
 
 根据当前Python版本自动加载对应的CTP二进制文件
 支持 Python 3.9, 3.10, 3.11, 3.12, 3.13, 3.14
+支持 Windows (.pyd + .dll) 和 Linux (.so) 平台
 """
 import sys
 import os
 import platform
+import ctypes
 from pathlib import Path
 
 # 全局变量
@@ -14,6 +16,10 @@ CTP_AVAILABLE = False
 thostmduserapi = None
 thosttraderapi = None
 _load_error = None
+
+# 平台标识
+_is_windows = platform.system() == 'Windows'
+_is_linux = platform.system() == 'Linux'
 
 
 def get_python_version_tag():
@@ -34,10 +40,11 @@ def get_ctp_directory():
         RuntimeError: 如果系统不支持或找不到对应版本的CTP文件
     """
     # 检查操作系统
-    if platform.system() != 'Windows':
+    if not (_is_windows or _is_linux):
         raise RuntimeError(
-            "CTP仅支持Windows系统\n"
-            "如需在Linux/Mac上运行，请使用纯回测模式"
+            f"CTP不支持当前操作系统: {platform.system()}\n"
+            "CTP仅支持 Windows 和 Linux 平台\n"
+            "如需在其他平台运行，请使用纯回测模式"
         )
     
     # 检查架构
@@ -62,8 +69,9 @@ def get_ctp_directory():
             if item.is_dir() and item.name.startswith('py'):
                 available_versions.append(item.name)
         
+        platform_name = "Windows" if _is_windows else "Linux"
         error_msg = (
-            f"找不到 Python {sys.version_info.major}.{sys.version_info.minor} 对应的CTP文件\n"
+            f"找不到 Python {sys.version_info.major}.{sys.version_info.minor} ({platform_name}) 对应的CTP文件\n"
             f"查找路径: {ctp_dir}\n\n"
         )
         
@@ -79,6 +87,24 @@ def get_ctp_directory():
         raise RuntimeError(error_msg)
     
     return ctp_dir
+
+
+def _preload_linux_so(ctp_dir_str):
+    """
+    Linux 平台预加载 CTP 运行时 .so 库
+    CTP 的 .so 文件没有 lib 前缀（如 thostmduserapi_se.so 而非 libthostmduserapi_se.so），
+    系统动态链接器无法自动找到它们，需要用 ctypes 显式预加载。
+    """
+    if not _is_linux:
+        return
+    
+    for so_name in ['thostmduserapi_se.so', 'thosttraderapi_se.so']:
+        so_path = os.path.join(ctp_dir_str, so_name)
+        if os.path.exists(so_path):
+            try:
+                ctypes.cdll.LoadLibrary(so_path)
+            except OSError as e:
+                print(f"[CTP] 警告: 预加载 {so_name} 失败: {e}")
 
 
 def load_ctp_modules():
@@ -100,16 +126,25 @@ def load_ctp_modules():
         if ctp_dir_str not in sys.path:
             sys.path.insert(0, ctp_dir_str)
         
-        # Windows下Python 3.8+需要显式添加DLL目录
-        if platform.system() == 'Windows' and hasattr(os, 'add_dll_directory'):
-            try:
-                os.add_dll_directory(ctp_dir_str)
-            except Exception:
-                # 如果添加失败（例如路径无效），尝试修改环境变量作为后备方案
+        if _is_windows:
+            # Windows下Python 3.8+需要显式添加DLL目录
+            if hasattr(os, 'add_dll_directory'):
+                try:
+                    os.add_dll_directory(ctp_dir_str)
+                except Exception:
+                    # 如果添加失败（例如路径无效），尝试修改环境变量作为后备方案
+                    os.environ['PATH'] = ctp_dir_str + os.pathsep + os.environ['PATH']
+            else:
+                # 旧版本Python
                 os.environ['PATH'] = ctp_dir_str + os.pathsep + os.environ['PATH']
-        else:
-            # 旧版本Python或非Windows系统
-            os.environ['PATH'] = ctp_dir_str + os.pathsep + os.environ['PATH']
+        elif _is_linux:
+            # Linux 平台：预加载 CTP 运行时 .so 库
+            _preload_linux_so(ctp_dir_str)
+            
+            # 同时将 CTP 目录添加到 LD_LIBRARY_PATH（供子进程使用）
+            ld_path = os.environ.get('LD_LIBRARY_PATH', '')
+            if ctp_dir_str not in ld_path:
+                os.environ['LD_LIBRARY_PATH'] = ctp_dir_str + os.pathsep + ld_path if ld_path else ctp_dir_str
         
         # 导入CTP模块（动态加载，静态分析器无法识别）
         import thostmduserapi as md_api  # type: ignore

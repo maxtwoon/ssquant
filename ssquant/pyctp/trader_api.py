@@ -24,6 +24,92 @@ except ImportError as e:
     sys.exit(1)
 
 
+def _get_exchange_id(instrument_id: str) -> str:
+    """
+    根据合约代码自动推导交易所代码
+    
+    优先从 ContractInfoService（远程API缓存）动态获取，自动覆盖新上市品种；
+    若服务不可用则回退到本地硬编码映射表兜底。
+    
+    Args:
+        instrument_id: 合约代码（如 au2602, OI605, IF2603）
+    
+    Returns:
+        交易所代码字符串（SHFE/INE/DCE/CZCE/CFFEX/GFEX），未知品种返回空字符串
+    """
+    if not instrument_id:
+        return ''
+    
+    # ===== 方式1：从 ContractInfoService 动态获取（自动覆盖新品种） =====
+    try:
+        from ..data.contract_info import get_contract_info
+        info = get_contract_info(instrument_id)
+        if info:
+            exchange = info.get('交易所', '')
+            if exchange:
+                return exchange
+    except Exception:
+        pass  # 服务不可用，回退到硬编码
+    
+    # ===== 方式2：硬编码映射表兜底（离线/服务异常时使用） =====
+    import re
+    match = re.match(r'^([a-zA-Z]+)', instrument_id)
+    if not match:
+        return ''
+    
+    product = match.group(1)
+    product_lower = product.lower()
+    product_upper = product.upper()
+    
+    # 各交易所品种集合（小写用于SHFE/INE/DCE/GFEX，大写用于CZCE/CFFEX）
+    _SHFE = {'cu', 'al', 'zn', 'pb', 'ni', 'sn', 'au', 'ag', 'rb', 'hc', 'wr', 'ss', 'bu', 'ru', 'fu', 'sp', 'ao', 'br'}
+    _INE  = {'sc', 'lu', 'nr', 'bc', 'ec'}
+    _DCE  = {'a', 'b', 'bb', 'c', 'cs', 'eb', 'eg', 'fb', 'i', 'j', 'jd', 'jm', 'l', 'lh', 'm', 'p', 'pg', 'pp', 'rr', 'v', 'y'}
+    _CZCE = {'AP', 'CF', 'CJ', 'CY', 'FG', 'JR', 'LR', 'MA', 'OI', 'PF', 'PK', 'PM', 'RI', 'RM', 'RS', 'SA', 'SF', 'SM', 'SR', 'TA', 'UR', 'WH', 'ZC', 'SH', 'PX'}
+    _CFFEX = {'IC', 'IF', 'IH', 'IM', 'IO', 'MO', 'HO', 'T', 'TF', 'TS', 'TL'}
+    _GFEX = {'si', 'lc'}
+    
+    if product_lower in _SHFE:
+        return 'SHFE'
+    elif product_lower in _INE:
+        return 'INE'
+    elif product_lower in _DCE:
+        return 'DCE'
+    elif product_upper in _CZCE:
+        return 'CZCE'
+    elif product_upper in _CFFEX:
+        return 'CFFEX'
+    elif product_lower in _GFEX:
+        return 'GFEX'
+    
+    return ''  # 未知品种，不设置ExchangeID（让CTP自行判断）
+
+
+# 上期所与上海能源中心：必须严格区分「平今」与「平昨」
+# 其余交易所（中金所/大商所/郑商所/广期所）使用通用「平仓」，由 CTP 自行处理今昨
+_SHFE_INE_EXCHANGES = {'SHFE', 'INE'}
+
+
+def close_comb_offset_flag(close_today: bool, instrument_id: str) -> str:
+    """
+    根据交易所规则返回平仓组合开平标志。
+
+    - SHFE / INE：必须明确区分平今('3') / 平昨('4')
+    - 其它交易所：统一返回平仓('1')，由 CTP 内部按今昨匹配
+
+    Args:
+        close_today: True=优先平今, False=优先平昨
+        instrument_id: 合约代码，用于推导交易所
+
+    Returns:
+        CTP CombOffsetFlag 字符串：'1' / '3' / '4'
+    """
+    exch = _get_exchange_id(instrument_id)
+    if exch in _SHFE_INE_EXCHANGES:
+        return '3' if close_today else '4'
+    return '1'
+
+
 def decode_ctp_error(error_msg):
     """解码CTP错误消息"""
     if isinstance(error_msg, bytes):
@@ -362,6 +448,11 @@ class TraderApi:
         req.ForceCloseReason = '0'
         req.CombOffsetFlag = offset_flag  # 开平标志
         req.CombHedgeFlag = '1'  # 投机
+        
+        # 自动设置交易所代码（解决郑商所/中金所等必须指定ExchangeID的问题）
+        exchange_id = _get_exchange_id(instrument_id)
+        if exchange_id:
+            req.ExchangeID = exchange_id
 
         self.request_id += 1
         self.api.ReqOrderInsert(req, self.request_id)

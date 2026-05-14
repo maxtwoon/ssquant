@@ -66,6 +66,8 @@ htmlcov/
 
 # 临时文件
 *.tmp
+*copy.py
+* copy.py
 
 # 构建产物
 build/

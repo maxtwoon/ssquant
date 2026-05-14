@@ -58,7 +58,11 @@ class BacktestDataManager:
                 'username': base_config.get('username', ''),
                 'password': base_config.get('password', ''),
                 'use_cache': base_config.get('use_cache', True),
-                'save_data': base_config.get('save_data', True)
+                'save_data': base_config.get('save_data', True),
+                # 新增: 精确时间范围和BAR线数量请求
+                'start_time': config.get('start_time'),
+                'end_time': config.get('end_time'),
+                'limit': config.get('limit'),
             }
             
             # 获取该品种的所有周期数据
@@ -116,7 +120,54 @@ class BacktestDataManager:
                     else:
                         print(f"[DATA] file_path 存在性检查失败: {config['file_path']!r} exists={os.path.exists(config['file_path'])}", flush=True)
                 
-                # 原有API/数据库分支
+                # ========== 本地数据模式：直接读取 SQLite，不走远程 API ==========
+                if base_config.get('data_source_mode') == 'local':
+                    from ..data.api_data_fetcher import get_cache_db_and_table, read_from_sqlite
+                    db_path, table_name = get_cache_db_and_table(symbol, kline_period, 'data_cache', adjust_type)
+                    
+                    if not os.path.exists(db_path):
+                        self.log(f"\n{'='*60}")
+                        self.log(f"【本地数据模式】数据库不存在: {db_path}")
+                        self.log(f"请使用 examples/A_工具_导入数据库DB示例.py 导入本地数据")
+                        self.log(f"支持格式: CSV / Excel / JSON / Parquet / Feather / Pickle")
+                        self.log(f"{'='*60}\n")
+                        continue
+                    
+                    try:
+                        df = read_from_sqlite(db_path, table_name)
+                        if df is None or df.empty:
+                            self.log(f"\n{'='*60}")
+                            self.log(f"【本地数据模式】表 {table_name} 为空或不存在")
+                            self.log(f"请使用 examples/A_工具_导入数据库DB示例.py 导入本地数据")
+                            self.log(f"支持格式: CSV / Excel / JSON / Parquet / Feather / Pickle")
+                            self.log(f"{'='*60}\n")
+                            continue
+                        
+                        # 日期筛选
+                        df['datetime'] = pd.to_datetime(df['datetime'])
+                        start_dt = data_params.get('start_date')
+                        end_dt = data_params.get('end_date')
+                        if start_dt:
+                            df = df[df['datetime'] >= pd.to_datetime(start_dt)]
+                        if end_dt:
+                            df = df[df['datetime'] <= pd.to_datetime(end_dt)]
+                        
+                        if df.empty:
+                            self.log(f"【本地数据模式】表 {table_name} 在指定日期范围内无数据")
+                            continue
+                        
+                        df = df.set_index('datetime')
+                        key = f"{symbol}_{kline_period}_{adjust_type}"
+                        data_dict[key] = df
+                        self.log(f"【本地数据模式】从 {table_name} 加载 {len(df)} 条K线数据")
+                        continue
+                    except Exception as e:
+                        self.log(f"【本地数据模式】读取本地数据失败: {e}")
+                        self.log(f"请检查数据库文件或使用 examples/A_工具_导入数据库DB示例.py 重新导入数据")
+                        self.log(f"支持格式: CSV / Excel / JSON / Parquet / Feather / Pickle")
+                        continue
+                
+                # ========== 远程数据模式（原有逻辑）==========
                 self.log(f"获取 {symbol} {kline_period} {'不复权' if adjust_type == '0' else '后复权'} 数据...")
                 
                 try:
@@ -139,7 +190,10 @@ class BacktestDataManager:
                         adjust_type=adjust_type,
                         depth="no",
                         use_cache=data_params['use_cache'],
-                        save_data=data_params['save_data']
+                        save_data=data_params['save_data'],
+                        start_time=data_params.get('start_time'),
+                        end_time=data_params.get('end_time'),
+                        limit=data_params.get('limit'),
                     )
                     
                     if klines is not None and not klines.empty:
@@ -188,33 +242,49 @@ class BacktestDataManager:
         self.data_dict = data_dict
         return data_dict
     
-    def create_data_sources(self, symbols_and_periods, data_dict):
+    def create_data_sources(self, symbols_and_periods, data_dict, lookback_bars: int = 0,
+                            symbol_configs: dict = None):
         """创建多数据源
         
         Args:
             symbols_and_periods: 品种和周期列表
             data_dict: 数据字典
+            lookback_bars: K线回溯窗口大小，0表示不限制（返回全部历史数据）
+            symbol_configs: 品种配置字典，用于获取 slippage_ticks 和 price_tick
             
         Returns:
             multi_data_source: 多数据源实例
         """
+        symbol_configs = symbol_configs or {}
+        
         # 创建多数据源
         for i, item in enumerate(symbols_and_periods):
             symbol = item['symbol']
             kline_period = item['kline_period']
             adjust_type = item['adjust_type']
             
+            # 获取品种配置中的滑点和最小变动价位
+            config = symbol_configs.get(symbol, {})
+            slippage_ticks = config.get('slippage_ticks', 1)
+            price_tick = config.get('price_tick', 1.0)
+            
             # 获取数据
             key = f"{symbol}_{kline_period}_{adjust_type}"
             if key in data_dict:
                 data = data_dict[key]
-                # 添加数据源
-                self.multi_data_source.add_data_source(symbol, kline_period, adjust_type, data)
-                self.log(f"添加数据源 #{i}: {symbol} {kline_period} adjust_type={adjust_type}")
+                # 添加数据源（传入lookback_bars、slippage_ticks、price_tick参数）
+                self.multi_data_source.add_data_source(symbol, kline_period, adjust_type, data, 
+                                                       lookback_bars=lookback_bars,
+                                                       slippage_ticks=slippage_ticks,
+                                                       price_tick=price_tick)
+                self.log(f"添加数据源 #{i}: {symbol} {kline_period} adjust_type={adjust_type} lookback={lookback_bars} slippage={slippage_ticks}跳 price_tick={price_tick}")
             else:
                 # 如果没有获取到这个周期的数据，添加一个空数据源
                 self.log(f"警告：未找到 {symbol} {kline_period} adjust_type={adjust_type} 数据，添加空数据源")
-                self.multi_data_source.add_data_source(symbol, kline_period, adjust_type)
+                self.multi_data_source.add_data_source(symbol, kline_period, adjust_type, 
+                                                       lookback_bars=lookback_bars,
+                                                       slippage_ticks=slippage_ticks,
+                                                       price_tick=price_tick)
         
         return self.multi_data_source
     
