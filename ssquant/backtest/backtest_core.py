@@ -207,7 +207,11 @@ class MultiSourceBacktester:
         self.logger.log_message("\n开始回测...")
         
         # 获取所有数据源的最小长度
-        min_length = min([len(ds.data) for ds in multi_data_source.data_sources if not ds.data.empty])
+        valid_data_sources = [ds for ds in multi_data_source.data_sources if not ds.data.empty]
+        if not valid_data_sources:
+            self.logger.log_message("错误：所有数据源均为空。可能原因：①API认证未配置(trading_config.py中API_USERNAME/API_PASSWORD)；②本地数据文件不存在；③网络连接失败")
+            return {}
+        min_length = min([len(ds.data) for ds in valid_data_sources])
         self.logger.log_message(f"回测数据长度: {min_length}条K线")
         
         # 记录回测开始时间

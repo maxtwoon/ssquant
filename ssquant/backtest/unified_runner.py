@@ -271,28 +271,37 @@ class UnifiedStrategyRunner:
             for symbol, periods in symbol_periods_map.items():
                 config = symbol_config_map[symbol].copy()
                 config['periods'] = periods
+                # 支持本地文件数据加载（多数据源模式同样透传 file_path）
+                if self.config.get('file_path'):
+                    config['file_path'] = self.config['file_path']
+                if self.config.get('db_table'):
+                    config['db_table'] = self.config['db_table']
                 self.backtester.add_symbol_config(symbol=symbol, config=config)
         else:
             # 单数据源模式
             symbol = self.config['symbol']
+            symbol_config = {
+                'start_date': self.config['start_date'],
+                'end_date': self.config['end_date'],
+                'initial_capital': self.config.get('initial_capital', 100000),
+                'commission': self.config.get('commission', 0.0001),
+                'margin_rate': self.config.get('margin_rate', 0.1),
+                'contract_multiplier': self.config.get('contract_multiplier', 10),
+                'slippage_ticks': self.config.get('slippage_ticks', 1),
+                'price_tick': self.config.get('price_tick', 1.0),
+                'periods': [
+                    {
+                        'kline_period': self.config['kline_period'],
+                        'adjust_type': self.config.get('adjust_type', '1')
+                    }
+                ]
+            }
+            # 支持本地文件数据加载
+            if self.config.get('file_path'):
+                symbol_config['file_path'] = self.config['file_path']
             self.backtester.add_symbol_config(
                 symbol=symbol,
-                config={
-                    'start_date': self.config['start_date'],
-                    'end_date': self.config['end_date'],
-                    'initial_capital': self.config.get('initial_capital', 100000),
-                    'commission': self.config.get('commission', 0.0001),
-                    'margin_rate': self.config.get('margin_rate', 0.1),
-                    'contract_multiplier': self.config.get('contract_multiplier', 10),
-                    'slippage_ticks': self.config.get('slippage_ticks', 1),
-                    'price_tick': self.config.get('price_tick', 1.0),
-                    'periods': [
-                        {
-                            'kline_period': self.config['kline_period'],
-                            'adjust_type': self.config.get('adjust_type', '1')
-                        }
-                    ]
-                }
+                config=symbol_config
             )
         
         # 运行回测

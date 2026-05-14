@@ -4,17 +4,27 @@ import pandas as pd
 
 def load_local_data(file_path, start_date=None, end_date=None, **kwargs):
     """
-    支持CSV、HDF5、7z格式的本地行情数据加载，并自动校验字段。
+    支持CSV、HDF5、7z、SQLite(.db/.sqlite/.sqlite3)格式的本地行情数据加载，并自动校验字段。
     K线数据必须字段: datetime, open, high, low, close
     Tick数据必须字段: datetime, price, volume
     推荐字段: volume, symbol
-    
+
     参数:
         file_path: 可以是单个文件路径(字符串)或多个文件路径列表([字符串])，
                   当传入列表时，将按顺序加载并合并数据
         start_date: 开始日期，格式为"YYYY-MM-DD"，用于筛选数据
         end_date: 结束日期，格式为"YYYY-MM-DD"，用于筛选数据
+
+    SQLite 专用 kwargs（仅在 file_path 为 .db/.sqlite/.sqlite3 时生效）:
+        db_table: 显式指定表名，例如 'au888_5m_hfq'
+        symbol / kline_period / adjust_type: 不传 db_table 时按项目约定
+            {symbol}_{period}_{adjust} 推导表名（adjust='hfq' if adjust_type=='1' else 'raw'）
     """
+    # 提取 SQLite 专用参数（避免它们泄漏到 pd.read_csv 等）
+    _db_table = kwargs.pop('db_table', None)
+    _db_symbol = kwargs.pop('symbol', None)
+    _db_period = kwargs.pop('kline_period', None) or kwargs.pop('period', None)
+    _db_adjust = kwargs.pop('adjust_type', '1')
     # 处理file_path为列表的情况
     if isinstance(file_path, list):
         if not file_path:
@@ -54,6 +64,68 @@ def load_local_data(file_path, start_date=None, end_date=None, **kwargs):
         if key is None:
             raise ValueError('HDF5文件必须指定key参数')
         df = pd.read_hdf(file_path, key=key)
+    elif ext in ['.db', '.sqlite', '.sqlite3']:
+        # SQLite 数据库分支
+        # 支持两种用法:
+        #   1) 显式传入 db_table='au888_5m_hfq'
+        #   2) 传入 symbol/kline_period/adjust_type，按项目约定推导表名
+        #      约定: {symbol}_{period}_{adjust}，adjust='hfq' if adjust_type=='1' else 'raw'
+        import sqlite3
+        conn = sqlite3.connect(file_path)
+        try:
+            cur = conn.cursor()
+            # 候选表名列表（按优先级）
+            candidates = []
+            if _db_table:
+                candidates.append(_db_table)
+            elif _db_symbol and _db_period:
+                # 项目里发现两种命名约定：
+                #   {symbol}_{period}_{hfq|raw} (历史预加载器约定，period 小写)
+                #   {symbol}_{PERIOD}_raw       (当前 kline_data.db 约定，period 大写，仅 raw)
+                # 都尝试一下
+                p_lower = _db_period.lower()  # '5m'
+                p_upper = _db_period.upper()  # '5M'
+                adjust_pref = 'hfq' if str(_db_adjust) == '1' else 'raw'
+                adjust_alt = 'raw' if adjust_pref == 'hfq' else 'hfq'
+                for period_v in (p_upper, p_lower):
+                    for adjust_v in (adjust_pref, adjust_alt):
+                        candidates.append(f"{_db_symbol}_{period_v}_{adjust_v}")
+            else:
+                raise ValueError(
+                    "读取SQLite数据库需要指定 db_table，或同时指定 symbol 和 kline_period。"
+                )
+
+            db_table = None
+            for cand in candidates:
+                cur.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (cand,),
+                )
+                if cur.fetchone() is not None:
+                    db_table = cand
+                    break
+
+            if db_table is None:
+                # 列出 symbol 相关的可用表名供排错
+                like_pattern = f"{_db_symbol}_%" if _db_symbol else "%"
+                cur.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ? ORDER BY name",
+                    (like_pattern,),
+                )
+                related = [r[0] for r in cur.fetchall()]
+                raise ValueError(
+                    f"SQLite 表不存在，已尝试: {candidates}\n"
+                    f"数据库文件: {file_path}\n"
+                    f"该 symbol 下相关表: {related}"
+                )
+
+            print(f"[SQLite] 使用表: {db_table}", flush=True)
+            df = pd.read_sql_query(
+                f"SELECT * FROM [{db_table}] ORDER BY datetime ASC",
+                conn,
+            )
+        finally:
+            conn.close()
     elif ext == '.7z':
         import py7zr
         import tempfile

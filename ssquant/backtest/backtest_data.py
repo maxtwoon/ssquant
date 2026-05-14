@@ -67,6 +67,8 @@ class BacktestDataManager:
                 adjust_type = period_config.get('adjust_type', '1')
                 
                 # 优先加载本地数据
+                print(f"[DEBUG] config keys: {list(config.keys())}", flush=True)
+                print(f"[DEBUG] file_path = {config.get('file_path')!r}", flush=True)
                 if 'file_path' in config and config['file_path']:
                     # 检查file_path是字符串还是列表
                     if isinstance(config['file_path'], list):
@@ -89,20 +91,30 @@ class BacktestDataManager:
                                 # 继续尝试API/数据库
                     # 单文件情况
                     elif os.path.exists(config['file_path']):
-                        self.log(f"直接加载本地数据: {config['file_path']}")
+                        print(f"[DATA] 直接加载本地数据: {config['file_path']}", flush=True)
                         try:
                             df = load_local_data(
-                                config['file_path'], 
-                                start_date=data_params['start_date'], 
-                                end_date=data_params['end_date']
+                                config['file_path'],
+                                start_date=data_params['start_date'],
+                                end_date=data_params['end_date'],
+                                # SQLite 路径需要这三个参数推导表名；
+                                # 其他格式（CSV/HDF5/7z）会忽略它们
+                                symbol=symbol,
+                                kline_period=kline_period,
+                                adjust_type=adjust_type,
+                                db_table=config.get('db_table'),
                             )
                             key = f"{symbol}_{kline_period}_{adjust_type}"
                             data_dict[key] = df
-                            self.log(f"本地数据加载成功，共 {len(df)} 条K线数据")
+                            print(f"[DATA] 本地数据加载成功，共 {len(df)} 条K线数据", flush=True)
                             continue  # 跳过API/数据库分支
                         except Exception as e:
-                            self.log(f"本地数据加载失败: {e}")
+                            import traceback as _tb
+                            print(f"[DATA-ERR] 本地数据加载失败: {e}", flush=True)
+                            _tb.print_exc()
                             # 继续尝试API/数据库
+                    else:
+                        print(f"[DATA] file_path 存在性检查失败: {config['file_path']!r} exists={os.path.exists(config['file_path'])}", flush=True)
                 
                 # 原有API/数据库分支
                 self.log(f"获取 {symbol} {kline_period} {'不复权' if adjust_type == '0' else '后复权'} 数据...")

@@ -79,3 +79,7 @@ backtest_results/
 # 旧的assets目录（已移到ssquant/assets/）
 /assets/
 
+
+# IDE local configs
+.claude/
+.qoder/
