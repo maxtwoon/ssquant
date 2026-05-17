@@ -579,22 +579,73 @@ def chanlun_5m_strategy(api: StrategyAPI):
 
     final_signal = aggregate_signals(signals)
 
-    # ------ 趋势过滤：用本源 5m 数据合成长周期 MA，避开多数据源对齐黑盒 ------
-    # 240 根 5m ≈ 20 小时（≈ 15m MA80 的等价物）
+    # ------ 趋势/震荡过滤：可切换 MA / DC（Donchian Channel）模式 ------
+    # trend_filter_type:
+    #   'ma'           — 5m × N 长周期均线，与现价比较（默认）
+    #   'dc_middle'    — DC 通道中轨方向过滤
+    #   'dc_breakout'  — 仅当价格逼近上/下轨时允许同向交易
+    #   'dc_bandwidth' — 带宽 < 阈值视为震荡，禁交易（配合中轨方向）
     if final_signal is not None and api.get_param('use_trend_filter', True):
-        trend_ma_period = api.get_param('trend_ma_period', 240)
+        filter_type = api.get_param('trend_filter_type', 'ma')
         trend_buffer = api.get_param('trend_buffer', 0.005)
         try:
-            close_trend = api.get_close(index=0)
-            if close_trend is not None and len(close_trend) >= trend_ma_period:
-                ma = float(close_trend.rolling(trend_ma_period).mean().iloc[-1])
-                cur = float(close_trend.iloc[-1])
-                trend_up = cur > ma * (1 + trend_buffer)
-                trend_down = cur < ma * (1 - trend_buffer)
-                if final_signal.direction > 0 and not trend_up:
-                    final_signal = None
-                elif final_signal.direction < 0 and not trend_down:
-                    final_signal = None
+            if filter_type == 'ma':
+                period = api.get_param('trend_ma_period', 240)
+                close_trend = api.get_close(index=0)
+                if close_trend is not None and len(close_trend) >= period:
+                    ma = float(close_trend.rolling(period).mean().iloc[-1])
+                    cur = float(close_trend.iloc[-1])
+                    trend_up = cur > ma * (1 + trend_buffer)
+                    trend_down = cur < ma * (1 - trend_buffer)
+                    if final_signal.direction > 0 and not trend_up:
+                        final_signal = None
+                    elif final_signal.direction < 0 and not trend_down:
+                        final_signal = None
+            else:
+                # DC（Donchian Channel）系列
+                dc_period = api.get_param('dc_period', 55)
+                highs = api.get_high(index=0)
+                lows = api.get_low(index=0)
+                closes = api.get_close(index=0)
+                if (highs is not None and lows is not None and closes is not None
+                        and len(closes) >= dc_period):
+                    upper = float(highs.rolling(dc_period).max().iloc[-1])
+                    lower = float(lows.rolling(dc_period).min().iloc[-1])
+                    middle = (upper + lower) / 2.0
+                    cur = float(closes.iloc[-1])
+
+                    if filter_type == 'dc_middle':
+                        # 中轨方向过滤（最简单，与 MA 模式同构）
+                        trend_up = cur > middle * (1 + trend_buffer)
+                        trend_down = cur < middle * (1 - trend_buffer)
+                        if final_signal.direction > 0 and not trend_up:
+                            final_signal = None
+                        elif final_signal.direction < 0 and not trend_down:
+                            final_signal = None
+
+                    elif filter_type == 'dc_breakout':
+                        # 仅允许靠近上轨做多 / 靠近下轨做空（强趋势准入）
+                        touch_ratio = api.get_param('dc_touch_ratio', 0.995)
+                        near_upper = cur >= upper * touch_ratio
+                        near_lower = cur <= lower * (2 - touch_ratio)
+                        if final_signal.direction > 0 and not near_upper:
+                            final_signal = None
+                        elif final_signal.direction < 0 and not near_lower:
+                            final_signal = None
+
+                    elif filter_type == 'dc_bandwidth':
+                        # 带宽 < 阈值视为震荡，禁交易；带宽足够时按中轨方向过滤
+                        bw_min = api.get_param('dc_bandwidth_min', 0.01)  # 1%
+                        bandwidth = (upper - lower) / middle if middle > 0 else 0
+                        if bandwidth < bw_min:
+                            final_signal = None
+                        else:
+                            trend_up = cur > middle * (1 + trend_buffer)
+                            trend_down = cur < middle * (1 - trend_buffer)
+                            if final_signal.direction > 0 and not trend_up:
+                                final_signal = None
+                            elif final_signal.direction < 0 and not trend_down:
+                                final_signal = None
         except Exception:
             pass
 
@@ -1012,10 +1063,16 @@ if __name__ == "__main__":
         'v_reversal_power_ratio': 1.3,
         'break_tolerance': 0.002,
         'kline_period': '5m',
-        # ---- 趋势过滤（5m 内部合成长周期 MA）----
+        # ---- 趋势/震荡过滤（可选 MA 或 DC）----
         'use_trend_filter': True,
-        'trend_ma_period': 240,           # 240 根 5m ≈ 20 小时（等价 15m MA80）
-        'trend_buffer': 0.005,
+        'trend_filter_type': 'ma',        # 'ma' | 'dc_middle' | 'dc_breakout' | 'dc_bandwidth'
+        'trend_buffer': 0.005,            # 中轨容忍带宽 (±0.5%)
+        # MA 模式参数
+        'trend_ma_period': 240,           # 240 根 5m ≈ 20 小时（跨品种稳健默认）
+        # DC（Donchian Channel）模式参数 — 默认 55 是经典海龟系统长期周期
+        'dc_period': 55,
+        'dc_touch_ratio': 0.995,          # dc_breakout 模式：靠近上下轨阈值
+        'dc_bandwidth_min': 0.01,         # dc_bandwidth 模式：带宽 < 1% 视为震荡禁交易
         # ---- 成交量过滤（短/长均量比 < 阈值 = 假结构）— 实测拖累，默认关 ----
         'use_volume_filter': False,
         'volume_short_period': 5,         # 最近 5 根（≈ 25 分钟）
@@ -1032,15 +1089,15 @@ if __name__ == "__main__":
     # ---------- 单数据源回测配置（只用 5m，框架行为简单可预测）----------
     # 跨品种验证：铁矿石 i888（vs 黄金 au888）
     config = get_config(RUN_MODE,
-        symbol='i888',                   # 铁矿石主连
-        start_date='2022-01-01',
-        end_date='2023-12-31',
+        symbol='au888',                  # 验证默认 ma=120 的新配置
+        start_date='2024-01-01',
+        end_date='2024-12-31',
         kline_period='5m',
         adjust_type='1',
 
         # 合约（铁矿石）
-        price_tick=0.5,                  # 铁矿石最小变动 0.5 元/吨
-        contract_multiplier=100,         # 铁矿石 100 吨/手
+        price_tick=0.02,                 # 黄金最小变动 0.02 元/克
+        contract_multiplier=1000,        # 黄金 1000 克/手
         slippage_ticks=1,
 
         # 资金

@@ -8,8 +8,10 @@
 """
 
 # ========== 松鼠俱乐部会员认证 quant789.com ========== 小松鼠VX：viquant01
-API_USERNAME = ""              # 俱乐部账号 (您的俱乐部手机号或邮箱)
-API_PASSWORD = ""            # 俱乐部密码 (注意：不是AI模型的API Key)
+API_USERNAME = "593515552@qq.com"
+API_PASSWORD = "asdzzx1220"
+# Tushare token (czsc 库可选，框架本身不依赖)
+TUSHARE_TOKEN = "da1f00839c22e497ddd81a46973751bc84315ba33d96472fd10547ca"
 
 # ========== 复权设置 ==========
 # 复权数据处理策略:

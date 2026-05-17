@@ -79,7 +79,7 @@ COMMON_STRATEGY_PARAMS = {
     'break_tolerance': 0.002,
     'kline_period': '5m',
     'use_trend_filter': True,
-    'trend_ma_period': 240,
+    'trend_ma_period': 240,           # 跨品种稳健默认（ma=120 仅适合 au/cu）
     'trend_buffer': 0.005,
     'use_volume_filter': False,
     'max_trades_per_trend': 2,

@@ -169,17 +169,18 @@ def get_trading_date_range(start_date, end_date):
     return trading_calendar.get_trading_date_range(start_date, end_date)
 
 def get_futures_data(
-    symbol, 
-    start_date, 
-    end_date, 
-    username=None, 
+    symbol,
+    start_date,
+    end_date,
+    username=None,
     password=None,
-    kline_period='D', 
-    adjust_type='0', 
+    kline_period='D',
+    adjust_type='0',
     depth='no',
     use_cache=True,
     cache_dir='data_cache',
-    save_data=False
+    save_data=False,
+    **kwargs  # 兼容新版 multi_data_fetcher 传入的 start_time/end_time/limit 等
 ):
     """
     从API获取期货数据
