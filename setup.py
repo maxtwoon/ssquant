@@ -25,7 +25,11 @@ else:
 
 setup(
     name='ssquant',
-    version='0.4.5',
+<<<<<<< HEAD
+    version='0.3.8',
+=======
+    version='0.4.6',
+>>>>>>> origin/main
     author='SSQuant Team',
     author_email='339093103@qq.com',
     description='专业的期货CTP量化交易框架',
@@ -64,9 +68,9 @@ setup(
     project_urls={
         'Homepage': 'https://github.com/songshuquant/ssquant',
         'Repository': 'https://github.com/songshuquant/ssquant',
+        'Gitee': 'https://gitee.com/ssquant/ssquant',
     },
 
     license='MIT',
     zip_safe=False,
 )
-

@@ -126,9 +126,14 @@ class SIMNOWMdSpi(MdSpi):
     def OnRspUserLogin(self, pRspUserLogin, pRspInfo, nRequestID: int, bIsLast: bool):
         """登录响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
+<<<<<<< HEAD
+            error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
+            full_msg = self._get_error_desc(pRspInfo.ErrorID, error_msg)
+=======
             # helper 定义在 SIMNOWTraderSpi 上，MdSpi 自身没有 —— 走 client.trader_spi 调用
             error_msg = self.client.trader_spi._decode_error_msg(pRspInfo.ErrorMsg)
             full_msg = self.client.trader_spi._format_error_output(pRspInfo.ErrorID, error_msg)
+>>>>>>> origin/main
             print(f"[{self._timestamp()}] [行情] 登录失败: {full_msg}")
             return
         
@@ -152,9 +157,14 @@ class SIMNOWMdSpi(MdSpi):
     def OnRspSubMarketData(self, pSpecificInstrument, pRspInfo, nRequestID: int, bIsLast: bool):
         """订阅行情响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
+<<<<<<< HEAD
+            error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
+            full_msg = self._get_error_desc(pRspInfo.ErrorID, error_msg)
+=======
             # helper 定义在 SIMNOWTraderSpi 上，MdSpi 自身没有 —— 走 client.trader_spi 调用
             error_msg = self.client.trader_spi._decode_error_msg(pRspInfo.ErrorMsg)
             full_msg = self.client.trader_spi._format_error_output(pRspInfo.ErrorID, error_msg)
+>>>>>>> origin/main
             print(f"[{self._timestamp()}] [行情] 订阅失败: {full_msg}")
         else:
             if pSpecificInstrument:
@@ -287,6 +297,10 @@ class SIMNOWTraderSpi(TraderSpi):
         """认证响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
+<<<<<<< HEAD
+            full_msg = self._get_error_desc(pRspInfo.ErrorID, error_msg)
+            print(f"[{self._timestamp()}] [交易] 认证失败: {full_msg}")
+=======
             full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
             print(f"[{self._timestamp()}] [交易] 认证失败: {full_msg}")
 
@@ -299,6 +313,7 @@ class SIMNOWTraderSpi(TraderSpi):
             # 读单个 int 在 CPython 下原子,无需持 _conn_epoch_lock (锁只保护 _bump_conn_epoch 的 read-modify-write)
             scheduled_epoch = self.client._conn_epoch
             threading.Timer(delay, self._retry_authenticate, args=[scheduled_epoch]).start()
+>>>>>>> origin/main
             return
 
         self._auth_retry_count = 0  # 认证成功，重置计数器
@@ -484,7 +499,11 @@ class SIMNOWTraderSpi(TraderSpi):
         """报单错误"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
+<<<<<<< HEAD
+            full_msg = self._get_error_desc(pRspInfo.ErrorID, error_msg)
+=======
             full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
+>>>>>>> origin/main
             print(f"[{self._timestamp()}] [交易] 报单失败: {full_msg}")
             
             # 智能追单重试逻辑
@@ -544,7 +563,11 @@ class SIMNOWTraderSpi(TraderSpi):
         """查询资金账户响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
+<<<<<<< HEAD
+            full_msg = self._get_error_desc(pRspInfo.ErrorID, error_msg)
+=======
             full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
+>>>>>>> origin/main
             print(f"[{self._timestamp()}] [交易] 查询资金失败: {full_msg}")
             return
         
@@ -661,7 +684,11 @@ class SIMNOWTraderSpi(TraderSpi):
         """查询成交响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
+<<<<<<< HEAD
+            full_msg = self._get_error_desc(pRspInfo.ErrorID, error_msg)
+=======
             full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
+>>>>>>> origin/main
             print(f"[{self._timestamp()}] [交易] 查询成交失败: {full_msg}")
             return
         
