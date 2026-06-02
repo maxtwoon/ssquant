@@ -45,16 +45,19 @@ def fetch_multiple_data(symbols_and_periods, configs):
             # 使用get_futures_data获取数据
             data = get_futures_data(
                 symbol=symbol,
-                start_date=config['start_date'],
-                end_date=config['end_date'],
-                username=config['username'],
-                password=config['password'],
+                start_date=config.get('start_date'),
+                end_date=config.get('end_date'),
+                username=config.get('username'),
+                password=config.get('password'),
                 kline_period=kline_period,
                 adjust_type=adjust_type,
                 depth="no",
                 use_cache=config.get('use_cache', True),
                 cache_dir=config.get('cache_dir', 'data_cache'),
-                save_data=config.get('save_data', True)
+                save_data=config.get('save_data', True),
+                start_time=config.get('start_time'),
+                end_time=config.get('end_time'),
+                limit=config.get('limit'),
             )
             
             if data is not None:
