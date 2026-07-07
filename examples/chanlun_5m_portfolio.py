@@ -31,38 +31,31 @@ import examples.chanlun_5m as _impl_mod
 # 组合配置
 # ============================================================================
 
-# 每个品种分配多少初始资金（等权重，总池 4 × 50w = 200w）
+# 每个品种分配多少初始资金（等权重，总池 5 × 50w = 250w）
 PER_SYMBOL_CAPITAL = 500_000
 
-# 测试时间段
-START_DATE = '2024-01-01'
+# 测试时间段（3 年纵向）
+START_DATE = '2022-01-01'
 END_DATE = '2024-12-31'
 
-# 品种 + 合约参数
+# 4 个跨赛道独立标的（贵金属 / 有色 / 能化 / 农产品）
+# 去掉 im888 中证1000：因 2022 年 7 月才上市，3 年数据不完整
 SYMBOLS = [
     {
-        'symbol': 'au888',
-        'name': '黄金',
-        'price_tick': 0.02,
-        'contract_multiplier': 1000,
+        'symbol': 'au888', 'name': '黄金',  'sector': '贵金属',
+        'price_tick': 0.02, 'contract_multiplier': 1000,
     },
     {
-        'symbol': 'i888',
-        'name': '铁矿石',
-        'price_tick': 0.5,
-        'contract_multiplier': 100,
+        'symbol': 'cu888', 'name': '铜',    'sector': '有色',
+        'price_tick': 10,   'contract_multiplier': 5,
     },
     {
-        'symbol': 'rb888',
-        'name': '螺纹钢',
-        'price_tick': 1,
-        'contract_multiplier': 10,
+        'symbol': 'sc888', 'name': '原油',  'sector': '能化',
+        'price_tick': 0.1,  'contract_multiplier': 1000,
     },
     {
-        'symbol': 'cu888',
-        'name': '铜',
-        'price_tick': 10,
-        'contract_multiplier': 5,
+        'symbol': 'm888',  'name': '豆粕',  'sector': '农产品',
+        'price_tick': 1,    'contract_multiplier': 10,
     },
 ]
 

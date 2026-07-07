@@ -86,6 +86,10 @@ class SignalType(Enum):
     TYPE3_SHORT = 6
     TYPE4_LONG = 7
     TYPE4_SHORT = 8
+    # 经典缠论"二买/二卖"专项检测 — 比 TYPE1 早一个端点确认
+    # 一买/一卖之后第一次回调不破前低/不破前高
+    TYPE1B_LONG = 9
+    TYPE1B_SHORT = 10
 
 
 @dataclass
@@ -334,6 +338,64 @@ def detect_type1_signal(endpoints: List[BiEndpoint],
     return None
 
 
+def detect_type1b_signal(endpoints: List[BiEndpoint],
+                         direction: str = 'long') -> Optional[ChanlunSignal]:
+    """
+    经典缠论"二买/二卖"专项检测 — 比 TYPE1 早一个端点确认。
+
+    做多（二买）：
+      一买之后的第一波反弹笔走完，回调笔的低点不破一买的低点。
+      端点序列要求：[L0, H0, L1]  且  L1 > L0
+      → L1 即为二买，入场价 ≈ L1，止损位 L0
+
+    做空（二卖）：
+      端点序列：[H0, L0, H1]  且  H1 < H0
+      → H1 即为二卖
+
+    与 TYPE1 的差异：
+      - TYPE1 要求 4 个端点 L-H-L-H（看到反弹突破前高）才确认 — 较晚
+      - TYPE1B 只要 3 个端点 L-H-L 且新低不破前低 — 较早
+    """
+    if len(endpoints) < 3:
+        return None
+    sorted_eps = sorted(endpoints, key=lambda e: e.dt)
+    recent = sorted_eps[-3:]
+
+    if direction == 'long':
+        # 期望模式: L H L  且 L1 > L0
+        if not (not recent[0].is_high and recent[1].is_high
+                and not recent[2].is_high):
+            return None
+        low_0, high_0, low_1 = recent[0].price, recent[1].price, recent[2].price
+        if low_1 > low_0:
+            return ChanlunSignal(
+                signal_type=SignalType.TYPE1B_LONG,
+                direction=1,
+                strength=0.7,
+                price=low_1,
+                datetime=recent[2].dt,
+                key_level=low_0,  # 止损一买低点
+                volume_ratio=1.2,
+            )
+    else:
+        # 期望模式: H L H  且 H1 < H0
+        if not (recent[0].is_high and not recent[1].is_high
+                and recent[2].is_high):
+            return None
+        high_0, low_0, high_1 = recent[0].price, recent[1].price, recent[2].price
+        if high_1 < high_0:
+            return ChanlunSignal(
+                signal_type=SignalType.TYPE1B_SHORT,
+                direction=-1,
+                strength=0.7,
+                price=high_1,
+                datetime=recent[2].dt,
+                key_level=high_0,
+                volume_ratio=1.2,
+            )
+    return None
+
+
 def detect_type2_signal(bi_list: List[Any], endpoints: List[BiEndpoint],
                         golden_ratio: float = 1.618) -> Optional[ChanlunSignal]:
     """2 类信号（强势延续）— 同向相邻两笔，后笔力度 >= 前笔 * 黄金分割"""
@@ -441,7 +503,10 @@ def detect_type4_signal(endpoints: List[BiEndpoint], bi_list: List[Any],
 
 
 def aggregate_signals(signals: List[ChanlunSignal]) -> Optional[ChanlunSignal]:
-    """信号聚合 — 多空冲突放弃；优先级 3 > 2 > 1 > 4（数字小 = 优先级高）"""
+    """
+    信号聚合 — 多空冲突放弃；优先级（数字小 = 优先级高）：
+      TYPE3 (三买/卖确认) > TYPE1B (经典二买/卖) > TYPE2 (强势延续) > TYPE1 (转向) > TYPE4 (V 反)
+    """
     if not signals:
         return None
     longs = [s for s in signals if s.direction > 0]
@@ -451,9 +516,10 @@ def aggregate_signals(signals: List[ChanlunSignal]) -> Optional[ChanlunSignal]:
     valid = longs if longs else shorts
     priority = {
         SignalType.TYPE3_LONG: 1, SignalType.TYPE3_SHORT: 1,
-        SignalType.TYPE2_LONG: 2, SignalType.TYPE2_SHORT: 2,
-        SignalType.TYPE1_LONG: 3, SignalType.TYPE1_SHORT: 3,
-        SignalType.TYPE4_LONG: 4, SignalType.TYPE4_SHORT: 4,
+        SignalType.TYPE1B_LONG: 2, SignalType.TYPE1B_SHORT: 2,  # 经典二买 — 确定性高于强势加仓
+        SignalType.TYPE2_LONG: 3, SignalType.TYPE2_SHORT: 3,
+        SignalType.TYPE1_LONG: 4, SignalType.TYPE1_SHORT: 4,
+        SignalType.TYPE4_LONG: 5, SignalType.TYPE4_SHORT: 5,
     }
     return sorted(valid, key=lambda s: priority.get(s.signal_type, 99))[0]
 
@@ -565,10 +631,12 @@ def chanlun_5m_strategy(api: StrategyAPI):
                 g_zs_history[-1].end_dt != new_zs.end_dt):
             g_zs_history.append(new_zs)
 
-    # ------ 步骤 3: 检测四类信号 ------
+    # ------ 步骤 3: 检测 5 类信号 ------
     signals: List[ChanlunSignal] = []
     for sig in (detect_type1_signal(endpoints, 'long'),
                 detect_type1_signal(endpoints, 'short'),
+                detect_type1b_signal(endpoints, 'long'),    # 经典二买
+                detect_type1b_signal(endpoints, 'short'),   # 经典二卖
                 detect_type2_signal(bi_list, endpoints, golden_ratio),
                 detect_type3_signal(endpoints, bi_list, break_tolerance),
                 detect_type4_signal(endpoints, bi_list,
@@ -1054,13 +1122,13 @@ if __name__ == "__main__":
     # ---------- 策略参数（单源 5m + 内部计算趋势）----------
     strategy_params = {
         'min_bi_len': 5,
-        'golden_ratio': 1.618,
+        'golden_ratio': 1.2,           # 原 1.618 太严苛 5m 上从未触发，降至 1.2
         'atr_period': 14,
         'atr_stop_multiplier': 2.5,
         'base_volume': 1,
         'use_structure_stop': True,
         'signal_cooldown': 6,
-        'v_reversal_power_ratio': 1.3,
+        'v_reversal_power_ratio': 1.1, # 原 1.3 5m 上从未触发，降至 1.1
         'break_tolerance': 0.002,
         'kline_period': '5m',
         # ---- 趋势/震荡过滤（可选 MA 或 DC）----
