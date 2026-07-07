@@ -25,11 +25,7 @@ else:
 
 setup(
     name='ssquant',
-<<<<<<< HEAD
-    version='0.3.8',
-=======
     version='0.4.6',
->>>>>>> origin/main
     author='SSQuant Team',
     author_email='339093103@qq.com',
     description='专业的期货CTP量化交易框架',

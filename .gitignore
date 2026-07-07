@@ -50,6 +50,8 @@ optimization/
 *.log
 *.csv
 *.db
+*.zip
+*_marker.txt
 
 # ⚠️ 本地配置文件 (包含敏感信息，禁止提交!)
 *_local.py

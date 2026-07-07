@@ -24,8 +24,6 @@ except ImportError as e:
     sys.exit(1)
 
 
-<<<<<<< HEAD
-=======
 def _get_exchange_id(instrument_id: str) -> str:
     """
     根据合约代码自动推导交易所代码
@@ -123,7 +121,6 @@ def close_comb_offset_flag(close_today: bool, instrument_id: str) -> str:
     return '1'
 
 
->>>>>>> origin/main
 def decode_ctp_error(error_msg):
     """解码CTP错误消息"""
     if isinstance(error_msg, bytes):

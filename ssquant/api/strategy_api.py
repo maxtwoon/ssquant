@@ -569,7 +569,7 @@ class StrategyAPI:
         self._ensure_ds_supports_indicator_cache(ds, 'get_indicator_array')
         return ds.get_indicator_array(name, window=window)
     
-    def buy(self, volume: int = 1, reason: str = "", order_type: str = 'bar_close', index: int = 0, offset_ticks: Optional[int] = None, price: Optional[float] = None):
+    def buy(self, volume: int = 1, reason: str = "", order_type: str = 'next_bar_open', index: int = 0, offset_ticks: Optional[int] = None, price: Optional[float] = None):
         """
         买入开仓
         
@@ -578,8 +578,8 @@ class StrategyAPI:
             reason: 交易原因
             order_type: 订单类型，可选值：
                 - 'limit': 限价单（需指定price）
-                - 'bar_close': 当前K线收盘价（默认）
-                - 'next_bar_open': 下一K线开盘价
+                - 'bar_close': 当前K线收盘价（v0.4.7 起含滑点；存在 look-ahead 偏差,建议显式使用 next_bar_open）
+                - 'next_bar_open': 下一K线开盘价（v0.4.7 起为默认；无 look-ahead）
                 - 'next_bar_close': 下一K线收盘价
                 - 'next_bar_high': 下一K线最高价
                 - 'next_bar_low': 下一K线最低价
@@ -592,7 +592,7 @@ class StrategyAPI:
         if ds:
             ds.buy(volume=volume, reason=reason, log_callback=self._log, order_type=order_type, offset_ticks=offset_ticks, price=price)
     
-    def sell(self, volume: Optional[int] = None, reason: str = "", order_type: str = 'bar_close', index: int = 0, offset_ticks: Optional[int] = None, price: Optional[float] = None):
+    def sell(self, volume: Optional[int] = None, reason: str = "", order_type: str = 'next_bar_open', index: int = 0, offset_ticks: Optional[int] = None, price: Optional[float] = None):
         """
         卖出平仓
         
@@ -608,7 +608,7 @@ class StrategyAPI:
         if ds:
             ds.sell(volume=volume, reason=reason, log_callback=self._log, order_type=order_type, offset_ticks=offset_ticks, price=price)
     
-    def sellshort(self, volume: int = 1, reason: str = "", order_type: str = 'bar_close', index: int = 0, offset_ticks: Optional[int] = None, price: Optional[float] = None):
+    def sellshort(self, volume: int = 1, reason: str = "", order_type: str = 'next_bar_open', index: int = 0, offset_ticks: Optional[int] = None, price: Optional[float] = None):
         """
         卖出开仓（做空）
         
@@ -624,7 +624,7 @@ class StrategyAPI:
         if ds:
             ds.sellshort(volume=volume, reason=reason, log_callback=self._log, order_type=order_type, offset_ticks=offset_ticks, price=price)
     
-    def buycover(self, volume: Optional[int] = None, reason: str = "", order_type: str = 'bar_close', index: int = 0, offset_ticks: Optional[int] = None, price: Optional[float] = None):
+    def buycover(self, volume: Optional[int] = None, reason: str = "", order_type: str = 'next_bar_open', index: int = 0, offset_ticks: Optional[int] = None, price: Optional[float] = None):
         """
         买入平仓（平空）
         
@@ -640,21 +640,21 @@ class StrategyAPI:
         if ds:
             ds.buycover(volume=volume, reason=reason, log_callback=self._log, order_type=order_type, offset_ticks=offset_ticks, price=price)
     
-    def buytocover(self, volume: Optional[int] = None, reason: str = "", order_type: str = 'bar_close', index: int = 0, offset_ticks: Optional[int] = None, price: Optional[float] = None):
+    def buytocover(self, volume: Optional[int] = None, reason: str = "", order_type: str = 'next_bar_open', index: int = 0, offset_ticks: Optional[int] = None, price: Optional[float] = None):
         """
         买入平仓（平空）- 兼容buytocover别名
         """
         return self.buycover(volume=volume, reason=reason, order_type=order_type, index=index, offset_ticks=offset_ticks, price=price)
     
-    def close_all(self, reason: str = "", order_type: str = 'bar_close', index: int = 0):
+    def close_all(self, reason: str = "", order_type: str = 'next_bar_open', index: int = 0):
         """
         平仓所有持仓
         
         Args:
             reason: 交易原因
             order_type: 订单类型，可选值：
-                - 'bar_close': 当前K线收盘价（默认）
-                - 'next_bar_open': 下一K线开盘价
+                - 'bar_close': 当前K线收盘价（v0.4.7 起含滑点；存在 look-ahead 偏差,建议显式使用 next_bar_open）
+                - 'next_bar_open': 下一K线开盘价（v0.4.7 起为默认；无 look-ahead）
                 - 'next_bar_close': 下一K线收盘价
                 - 'next_bar_high': 下一K线最高价
                 - 'next_bar_low': 下一K线最低价
@@ -665,15 +665,15 @@ class StrategyAPI:
         if ds:
             ds.close_all(reason=reason, log_callback=self._log, order_type=order_type)
     
-    def reverse_pos(self, reason: str = "", order_type: str = 'bar_close', index: int = 0):
+    def reverse_pos(self, reason: str = "", order_type: str = 'next_bar_open', index: int = 0):
         """
         反转持仓
         
         Args:
             reason: 交易原因
             order_type: 订单类型，可选值：
-                - 'bar_close': 当前K线收盘价（默认）
-                - 'next_bar_open': 下一K线开盘价
+                - 'bar_close': 当前K线收盘价（v0.4.7 起含滑点；存在 look-ahead 偏差,建议显式使用 next_bar_open）
+                - 'next_bar_open': 下一K线开盘价（v0.4.7 起为默认；无 look-ahead）
                 - 'next_bar_close': 下一K线收盘价
                 - 'next_bar_high': 下一K线最高价
                 - 'next_bar_low': 下一K线最低价

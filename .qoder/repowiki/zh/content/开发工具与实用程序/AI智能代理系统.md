@@ -2,17 +2,23 @@
 
 <cite>
 **本文档引用的文件**
-- [ai_agent/app.py](file://ai_agent/app.py)
-- [ai_agent/__init__.py](file://ai_agent/__init__.py)
-- [ai_agent/settings.json](file://ai_agent/settings.json)
-- [ai_agent/history.json](file://ai_agent/history.json)
+- [ai_agent/backend.py](file://ai_agent/backend.py)
+- [ai_agent/start_server.py](file://ai_agent/start_server.py)
 - [ai_agent/templates/index.html](file://ai_agent/templates/index.html)
 - [ai_agent/requirements.txt](file://ai_agent/requirements.txt)
-- [ai_agent/prompt.py](file://ai_agent/prompt.py)
+- [ai_agent/README.md](file://ai_agent/README.md)
 - [ssquant/backtest/unified_runner.py](file://ssquant/backtest/unified_runner.py)
 - [ssquant/api/strategy_api.py](file://ssquant/api/strategy_api.py)
 - [README.md](file://README.md)
 </cite>
+
+## 更新摘要
+**所做更改**
+- 更新后端架构：从app.py重构为backend.py，提供更清晰的模块分离
+- 增强模板系统：改进HTML模板渲染和用户界面交互
+- 提升Markdown渲染能力：优化代码展示和格式化效果
+- 改进附件处理：增强文件上传和管理功能
+- 强化思维模式支持：改进AI对话和策略生成机制
 
 ## 目录
 1. [简介](#简介)
@@ -38,7 +44,7 @@ AI智能代理系统是一个基于SSQuant量化交易框架的AI驱动策略编
 
 ## 项目结构
 
-AI智能代理系统采用模块化设计，主要包含以下核心模块：
+AI智能代理系统采用模块化设计，经过重构后主要包含以下核心模块：
 
 ```mermaid
 graph TB
@@ -64,11 +70,11 @@ A --> L
 ```
 
 **图表来源**
-- [ai_agent/app.py:1-100](file://ai_agent/app.py#L1-L100)
+- [ai_agent/backend.py:1-100](file://ai_agent/backend.py#L1-L100)
 - [README.md:350-366](file://README.md#L350-L366)
 
 系统的主要目录结构：
-- `ai_agent/`：AI智能代理核心模块
+- `ai_agent/`：AI智能代理核心模块，包含重构后的backend.py和start_server.py
 - `ssquant/`：SSQuant量化交易框架核心
 - `examples/`：示例策略和工具
 - `docs/`：技术文档和策略说明
@@ -77,6 +83,15 @@ A --> L
 - [README.md:350-366](file://README.md#L350-L366)
 
 ## 核心组件
+
+### 重构后的后端架构
+
+经过重大重构，系统现在采用更清晰的模块分离架构：
+
+- **backend.py**：核心业务逻辑和AI处理功能
+- **start_server.py**：生产环境启动服务，替代直接运行模式
+- **模板系统**：增强的HTML模板渲染和用户界面交互
+- **配置管理**：改进的设置持久化和参数管理
 
 ### AI对话引擎
 
@@ -89,12 +104,13 @@ AI对话引擎是系统的核心组件，负责处理用户输入并生成策略
 
 ### Web界面系统
 
-Web界面提供直观的用户交互体验，包含以下功能模块：
+Web界面提供直观的用户交互体验，经过增强后包含以下功能模块：
 
 - **代码编辑器**：基于Monaco Editor的代码编辑环境
-- **聊天对话**：AI助手对话界面
+- **聊天对话**：AI助手对话界面，支持思维模式切换
 - **策略管理**：策略文件的创建、编辑、保存和管理
 - **回测控制**：一键运行回测、查看报告和结果分析
+- **Markdown渲染**：改进的代码展示和格式化效果
 
 ### 策略管理系统
 
@@ -106,12 +122,12 @@ Web界面提供直观的用户交互体验，包含以下功能模块：
 - **工作区管理**：支持多工作区并行开发
 
 **章节来源**
-- [ai_agent/app.py:242-271](file://ai_agent/app.py#L242-L271)
+- [ai_agent/backend.py:242-271](file://ai_agent/backend.py#L242-L271)
 - [ai_agent/templates/index.html:1-200](file://ai_agent/templates/index.html#L1-L200)
 
 ## 架构概览
 
-系统采用分层架构设计，确保各组件之间的松耦合和高内聚：
+系统采用分层架构设计，经过重构后确保各组件之间的松耦合和高内聚：
 
 ```mermaid
 graph TB
@@ -146,7 +162,7 @@ FS --> DB
 ```
 
 **图表来源**
-- [ai_agent/app.py:41-60](file://ai_agent/app.py#L41-L60)
+- [ai_agent/backend.py:41-60](file://ai_agent/backend.py#L41-L60)
 - [ssquant/backtest/unified_runner.py:26-58](file://ssquant/backtest/unified_runner.py#L26-L58)
 
 ### 数据流架构
@@ -160,13 +176,13 @@ FS --> DB
 5. **结果反馈**：将回测结果和报告返回给用户
 
 **章节来源**
-- [ai_agent/app.py:718-800](file://ai_agent/app.py#L718-L800)
+- [ai_agent/backend.py:718-800](file://ai_agent/backend.py#L718-L800)
 
 ## 详细组件分析
 
-### Flask Web服务架构
+### 重构后的Flask Web服务架构
 
-Flask作为Web服务框架，提供了RESTful API和静态文件服务：
+经过重构，Flask作为Web服务框架提供了更清晰的模块分离：
 
 ```mermaid
 classDiagram
@@ -201,13 +217,13 @@ AppState --> BacktestManager : "uses"
 ```
 
 **图表来源**
-- [ai_agent/app.py:214-240](file://ai_agent/app.py#L214-L240)
-- [ai_agent/app.py:313-431](file://ai_agent/app.py#L313-L431)
-- [ai_agent/app.py:718-800](file://ai_agent/app.py#L718-L800)
+- [ai_agent/backend.py:214-240](file://ai_agent/backend.py#L214-L240)
+- [ai_agent/backend.py:313-431](file://ai_agent/backend.py#L313-L431)
+- [ai_agent/backend.py:718-800](file://ai_agent/backend.py#L718-L800)
 
-### AI对话处理机制
+### 增强的AI对话处理机制
 
-AI对话处理机制支持多种AI模型和对话模式：
+AI对话处理机制支持多种AI模型和对话模式，经过增强后：
 
 ```mermaid
 sequenceDiagram
@@ -228,10 +244,10 @@ WebUI-->>User : 展示分析报告
 ```
 
 **图表来源**
-- [ai_agent/app.py:313-431](file://ai_agent/app.py#L313-L431)
-- [ai_agent/app.py:718-800](file://ai_agent/app.py#L718-L800)
+- [ai_agent/backend.py:313-431](file://ai_agent/backend.py#L313-L431)
+- [ai_agent/backend.py:718-800](file://ai_agent/backend.py#L718-L800)
 
-### 策略代码生成流程
+### 改进的策略代码生成流程
 
 策略代码生成采用智能处理机制，支持精确修改和完整代码两种模式：
 
@@ -255,13 +271,13 @@ ShowError --> End
 ```
 
 **图表来源**
-- [ai_agent/app.py:665-702](file://ai_agent/app.py#L665-L702)
-- [ai_agent/app.py:704-717](file://ai_agent/app.py#L704-L717)
+- [ai_agent/backend.py:665-702](file://ai_agent/backend.py#L665-L702)
+- [ai_agent/backend.py:704-717](file://ai_agent/backend.py#L704-L717)
 
 **章节来源**
-- [ai_agent/app.py:500-702](file://ai_agent/app.py#L500-L702)
+- [ai_agent/backend.py:500-702](file://ai_agent/backend.py#L500-L702)
 
-### 配置管理系统
+### 增强的配置管理系统
 
 配置管理系统提供灵活的参数管理和持久化功能：
 
@@ -310,12 +326,12 @@ ConfigManager --> BacktestParams : "manages"
 ```
 
 **图表来源**
-- [ai_agent/app.py:82-134](file://ai_agent/app.py#L82-L134)
-- [ai_agent/settings.json:1-51](file://ai_agent/settings.json#L1-L51)
+- [ai_agent/backend.py:82-134](file://ai_agent/backend.py#L82-L134)
+- [ai_agent/README.md:1-51](file://ai_agent/README.md#L1-L51)
 
 **章节来源**
-- [ai_agent/app.py:82-183](file://ai_agent/app.py#L82-L183)
-- [ai_agent/settings.json:1-51](file://ai_agent/settings.json#L1-L51)
+- [ai_agent/backend.py:82-183](file://ai_agent/backend.py#L82-L183)
+- [ai_agent/README.md:1-51](file://ai_agent/README.md#L1-L51)
 
 ## 依赖关系分析
 
@@ -360,7 +376,7 @@ WebUI --> Marked
 
 **章节来源**
 - [ai_agent/requirements.txt:1-56](file://ai_agent/requirements.txt#L1-L56)
-- [ai_agent/app.py:35-42](file://ai_agent/app.py#L35-L42)
+- [ai_agent/backend.py:35-42](file://ai_agent/backend.py#L35-L42)
 
 ## 性能考虑
 
@@ -386,7 +402,7 @@ WebUI --> Marked
 
 **章节来源**
 - [README.md:24-48](file://README.md#L24-L48)
-- [ai_agent/app.py:718-762](file://ai_agent/app.py#L718-L762)
+- [ai_agent/backend.py:718-762](file://ai_agent/backend.py#L718-L762)
 
 ## 故障排除指南
 
@@ -419,13 +435,23 @@ WebUI --> Marked
 3. 确认系统资源充足
 4. 查看回测日志输出
 
+#### 后端启动问题
+
+**问题**：直接运行backend.py失败
+**解决方案**：
+1. 使用`python start_server.py`启动服务
+2. 检查生产环境配置
+3. 验证端口占用情况
+4. 查看启动日志输出
+
 **章节来源**
-- [ai_agent/app.py:421-431](file://ai_agent/app.py#L421-L431)
-- [ai_agent/app.py:764-784](file://ai_agent/app.py#L764-L784)
+- [ai_agent/backend.py:421-431](file://ai_agent/backend.py#L421-L431)
+- [ai_agent/backend.py:764-784](file://ai_agent/backend.py#L764-L784)
+- [ai_agent/backend.py:2024-2029](file://ai_agent/backend.py#L2024-L2029)
 
 ## 结论
 
-AI智能代理系统是一个功能完整、架构清晰的量化策略开发平台。通过将AI技术与专业的量化交易框架相结合，系统实现了从自然语言到可执行策略代码的自动化转换，大大降低了量化策略开发的门槛。
+AI智能代理系统经过重大重构后，成为一个功能更加完善、架构更加清晰的量化策略开发平台。通过将AI技术与专业的量化交易框架相结合，系统实现了从自然语言到可执行策略代码的自动化转换，大大降低了量化策略开发的门槛。
 
 系统的主要优势包括：
 
@@ -433,5 +459,8 @@ AI智能代理系统是一个功能完整、架构清晰的量化策略开发平
 2. **性能优异**：基于SSQuant框架的高性能指标计算，显著提升回测效率
 3. **用户体验好**：提供直观的Web界面和完整的开发工具链
 4. **扩展性强**：模块化设计便于功能扩展和定制开发
+5. **部署友好**：清晰的生产环境启动方式和配置管理
 
 随着AI技术的不断发展，该系统有望在量化策略开发领域发挥越来越重要的作用，为投资者提供更加智能化、自动化的交易解决方案。
+
+**更新** 本次更新反映了系统的重大改进：后端重构为backend.py、模板系统增强、Markdown渲染能力提升、附件处理改进、思维模式支持增强等关键变化。

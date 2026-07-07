@@ -182,16 +182,6 @@ def ma_cross_strategy(api: StrategyAPI):
 # =====================================================================
 
 if __name__ == "__main__":
-<<<<<<< HEAD
-    from ssquant.config.trading_config import get_config
-    
-    # ========== 运行模式 ==========
-    RUN_MODE = RunMode.BACKTEST  # 可选: BACKTEST, SIMNOW, REAL_TRADING
-    
-    # ========== 策略参数 ==========
-    strategy_params = {'fast_ma': 5, 'slow_ma': 20}
-    
-=======
     # 运行模式: BACKTEST(回测) / SIMNOW(模拟盘) / REAL_TRADING(实盘交易)
     RUN_MODE = RunMode.BACKTEST
 
@@ -202,7 +192,6 @@ if __name__ == "__main__":
         'verbose_kline': True,   # True=每根K打印最后一根OHLC（调试）；实盘建议 False
     }
 
->>>>>>> origin/main
     # ========== 配置 ==========
     if RUN_MODE == RunMode.BACKTEST:
         # ==================== 回测配置 ====================

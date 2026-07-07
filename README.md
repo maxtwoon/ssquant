@@ -2,28 +2,15 @@
 
 SSQuant（松鼠Quant）是面向中国期货市场的 Python 量化交易框架，支持一套策略代码在 **回测 / SIMNOW 仿真 / CTP 实盘** 三种环境中运行。
 
-<<<<<<< HEAD
-🐿️ **松鼠Quant** | 专业的期货CTP量化交易框架
-<img width="728" height="352" alt="image" src="https://github.com/user-attachments/assets/26201b06-0992-44dd-8416-03edcbb8878b" />
-=======
 它不是只做历史回测的 toy project，而是围绕期货交易的真实工程问题设计：连续合约、复权、换月、保证金、手续费、滑点、CTP 下单、Tick/K 线数据、SIMNOW 验证、实盘运行和回测报告。
->>>>>>> origin/main
 
 当前版本：v0.4.6
 Python：3.9 - 3.14
 License：MIT
 
-<<<<<<< HEAD
-[GitHub](https://github.com/songshuquant/ssquant) | [Gitee（国内推荐）](https://gitee.com/ssquant/ssquant)
-
-**一次编写，三处运行** - 回测 / SIMNOW模拟 / 实盘CTP
-
-</div>
-=======
 - GitHub: https://github.com/songshuquant/ssquant
 - Gitee: https://gitee.com/ssquant/ssquant
 - 官网: https://quant789.com
->>>>>>> origin/main
 
 ---
 
@@ -35,59 +22,6 @@ SSQuant 的核心目标是：
 
 策略只和 `StrategyAPI` 交互：
 
-<<<<<<< HEAD
-- **自动开平仓管理** - 智能识别开平仓、今昨仓
-- **智能算法交易** - 支持限价单排队、超时撤单、追价重发等高级逻辑
-- **实时回调系统** - on_trade/on_order/on_cancel 实时通知
-- **TICK流双驱动** - K线驱动 + TICK驱动两种模式
-
-### ✅ 丰富的策略示例
-
-- 19个完整策略示例
-- 涵盖趋势、套利、轮动、期权、机器学习等类型
-- 从入门到高级，循序渐进
-
----
-
-## 🖥️ 系统要求
-
-| 项目 | 要求 |
-|------|------|
-| **操作系统** | Windows 10+（⚠️ 目前仅支持 Windows，Linux 版本待更新） |
-| **Python** | 3.9 ~ 3.14 |
-| **CTP版本** | 6.7.7 ~ 6.7.10 |
-| **内存** | 4GB+ |
-
----
-
-## ⚡ 快速开始
-
-### 1. 安装
-
-#### 方式一：使用 pip 安装（推荐）
-
-```bash
-pip install ssquant
-```
-
-> 💡 **新手安装指引 (解决环境问题)**
-> 
-> 如果遇到环境索引问题，请按以下步骤操作：
-> 1. **卸载旧版本**：`pip uninstall ssquant`
-> 2. **重新安装**（推荐使用国内源）：
->    ```bash
->    pip install ssquant -i https://pypi.tuna.tsinghua.edu.cn/simple
->    ```
-> 3. **获取示例**：新手朋友直接通过 pip 安装框架，然后到 [GitHub](https://github.com/songshuquant/ssquant) 或 [Gitee（国内推荐）](https://gitee.com/ssquant/ssquant) 下载 `examples/` 目录下的策略示例。
-> 4. **补充依赖**：运行中如果提示缺什么库，直接 `pip install 库名` 安装即可。
-
-#### 方式二：从 GitHub/Gitee 源码安装
-
-如果您下载了源码压缩包（通常解压后文件夹名为 `ssquant-main`），或者通过 git clone 拉取了代码：
-
-1. 打开终端（CMD/PowerShell），进入该文件夹（确保能看到 `setup.py` 文件）。
-2. 运行安装命令：
-=======
 ```python
 api.buy()
 api.sell()
@@ -151,94 +85,11 @@ v0.4.6 改为价格双轨体系：
 正式安装请使用源码仓库。PyPI 只保留弃用提示包，不再作为真实安装入口。
 
 ### GitHub
->>>>>>> origin/main
 
 ```bash
 pip install -e .
 ```
 
-<<<<<<< HEAD
-> **注意**：
-> - 命令最后有一个点 `.`，代表当前目录，不要漏掉。
-> - 文件夹名字（如 `ssquant-main`）不影响安装，只要目录结构正确即可。
-
-#### ❓ 常见问题：ModuleNotFoundError: No module named 'ssquant'
-
-如果运行策略时遇到这个错误：
-
-```
-ModuleNotFoundError: No module named 'ssquant'
-```
-
-**原因**：ssquant 未安装或已被卸载。
-
-**解决方法**：
-
-1. 检查是否已安装：
-   ```bash
-   pip list | findstr ssquant   # Windows
-   ```
-
-2. 如果没有找到，重新安装：
-   ```bash
-   # 方式一：从 PyPI 安装
-   pip install ssquant
-   
-   # 方式二：从源码安装（在项目目录下执行）
-   pip install -e .
-   ```
-
-3. 验证安装成功：
-   ```bash
-   python -c "from ssquant.api.strategy_api import StrategyAPI; print('ssquant 导入成功!')"
-   ```
-
-### 2. 配置账户
-
-安装完成后，需要配置相关账户信息。编辑 `ssquant/config/trading_config.py`：
-
-#### 📊 数据API配置（回测必需）
-
-框架使用**松鼠俱乐部会员远程数据库**，会员填入账号密码后，回测和实盘自动预拉取数据到本地：
-
-```python
-# ========== 数据API认证 (松鼠俱乐部会员) ==========
-API_USERNAME = "你的会员账号"
-API_PASSWORD = "你的会员密码"
-```
-
-> 💡 **非会员用户**：
-> - 可自行修改远程服务器地址
-> - 或参考 `examples/A_工具_导入数据库DB示例.py` 导入本地数据
-
-#### 🔐 交易账户配置（模拟/实盘）
-
-```python
-# SIMNOW账户（模拟交易）
-ACCOUNTS = {
-    'simnow_default': {
-        'investor_id': '你的SIMNOW账号',
-        'password': '你的密码',
-        'server_name': '电信1',  # 电信1/电信2/移动/TEST
-        # ...
-    },
-    
-    # 实盘账户
-    'real_default': {
-        'broker_id': '期货公司代码',
-        'investor_id': '资金账号',
-        'password': '密码',
-        'md_server': 'tcp://xxx:port',
-        'td_server': 'tcp://xxx:port',
-        'app_id': 'AppID',
-        'auth_code': '授权码',
-        # ...
-    },
-}
-```
-
-### 3. 编写策略
-=======
 ### Gitee
 
 ```bash
@@ -272,7 +123,6 @@ SSQuant 支持两种数据模式。
 - 免去本地导入和维护数据的成本。
 
 示例：
->>>>>>> origin/main
 
 ```python
 config = get_config(
@@ -370,15 +220,11 @@ if __name__ == "__main__":
     runner.run(strategy=strategy, initialize=initialize)
 ```
 
-<<<<<<< HEAD
-### 4. 切换模式只需改配置
-=======
 ---
 
 ## 三模式切换
 
 策略函数不需要因为运行环境变化而重写。通常只切换 `RunMode` 和配置。
->>>>>>> origin/main
 
 ```python
 # 回测
@@ -413,89 +259,9 @@ config = get_config(
 
 ## StrategyAPI 约定
 
-<<<<<<< HEAD
-| 文档 | 说明 | 适合 |
-|------|------|------|
-| [用户手册.md](用户手册.md) | 📖 完整使用教程 | 新手必读 |
-| [API参考手册.md](API参考手册.md) | 📚 详细API说明 | 开发查询 |
-| [文档导航.md](文档导航.md) | 📑 所有文档索引 | 查找文档 |
----
-
-## 🎓 示例策略
-
-所有示例在 `examples/` 目录（共19个）：
-
-### 工具类 (A_开头)
-
-| 文件 | 说明 |
-|------|------|
-| `A_工具_导入数据库DB示例.py` | 数据导入数据库 |
-| `A_工具_数据库管理_查看与删除.py` | 数据库管理 |
-| `A_撤单重发示例.py` | 订单撤单重发机制 |
-| `A_穿透式测试脚本.py` | CTP穿透式认证测试 |
-
-### 策略类 (B_开头)
-
-| 文件 | 说明 |
-|------|------|
-| `B_双均线策略.py` | ⭐ 经典均线交叉，入门推荐 |
-| `B_海龟交易策略.py` | 唐奇安通道突破 |
-| `B_十大经典策略之Aberration.py` | 布林带突破 |
-| `B_日内交易策略.py` | 日内交易 |
-| `B_网格交易策略.py` | 网格交易 |
-| `B_强弱截面轮动策略.py` | 多品种强弱轮动 |
-| `B_跨周期过滤策略.py` | 多周期信号过滤 |
-| `B_跨品种套利策略.py` | 品种间价差套利 |
-| `B_跨期套利策略.py` | 同品种跨期套利 |
-| `B_多品种多周期交易策略.py` | 多品种多周期 |
-| `B_多品种多周期交易策略_参数优化.py` | 参数优化示例 |
-| `B_机器学习策略_随机森林.py` | ML机器学习预测 |
-
-### 高级类 (C_开头)
-
-| 文件 | 说明 |
-|------|------|
-| `C_期权交易策略.py` | 期权交易 |
-| `C_期货期权组合策略.py` | 期货期权组合 |
-| `C_纯Tick高频交易策略.py` | TICK流高频交易 |
-
----
-
-## 🏗️ 项目结构
-
-```
-ssquant/
-├── api/                    # 策略API
-│   └── strategy_api.py     # 核心API类
-├── backtest/               # 回测引擎
-│   ├── unified_runner.py   # 统一运行器
-│   ├── backtest_core.py    # 回测核心
-│   └── live_trading_adapter.py  # 实盘适配器
-├── config/                 # 配置管理
-│   └── trading_config.py   # 配置生成（账户配置在此）
-├── data/                   # 数据管理
-│   ├── api_data_fetcher.py # API数据获取
-│   └── local_data_loader.py # 本地数据加载
-├── ctp/                    # CTP二进制文件
-│   ├── py39/ ~ py314/      # 各Python版本的CTP文件
-│   └── loader.py           # CTP加载器
-├── pyctp/                  # CTP封装
-│   ├── simnow_client.py    # SIMNOW客户端
-│   └── real_trading_client.py  # 实盘客户端
-└── indicators/             # 技术指标
-    └── tech_indicators.py
-```
-
----
-
-## 💡 核心API
-
-### 数据获取
-=======
 策略必须通过 `StrategyAPI` 交易。不要在策略里直接操作底层 CTP 接口。
 
 ### 交易接口
->>>>>>> origin/main
 
 ```python
 api.buy(volume=1)        # 开多
@@ -755,78 +521,6 @@ v0.4.6 通过价格双轨制把复权价映射回真实价格，并用真实价�
 
 ## 许可证与风险提示
 
-<<<<<<< HEAD
-- **Python**: 3.9 ~ 3.14
-- **系统**: Windows 10+（⚠️ 目前仅支持 Windows，Linux 版本待更新）
-- **内存**: 4GB+
-- **网络**: 稳定连接（实盘/SIMNOW）
-
-### CTP版本支持
-
-框架内置 CTP 6.7.7 ~ 6.7.10 版本，位于 `ssquant/ctp/pyXXX/` 目录：
-
-| Python版本 | 目录 | 状态 |
-|-----------|------|------|
-| 3.9 | `py39/` | ✅ 已包含 |
-| 3.10 | `py310/` | ✅ 已包含 |
-| 3.11 | `py311/` | ✅ 已包含 |
-| 3.12 | `py312/` | ✅ 已包含 |
-| 3.13 | `py313/` | ✅ 已包含 |
-| 3.14 | `py314/` | ✅ 已包含 |
-
----
-
-## ⚠️ 风险提示
-
-本框架仅供学习和研究使用。期货交易有风险，入市需谨慎。
-
-- ⚠️ 请先在SIMNOW充分测试（至少1周）
-- ⚠️ 实盘前用小资金验证
-- ⚠️ 做好风险管理和止损
-- ⚠️ 不要使用高杠杆
-
----
-
-## 📖 快速链接
-
-- [PyPI 主页](https://pypi.org/project/ssquant/) - 安装和版本信息
-- [GitHub 仓库](https://github.com/songshuquant/ssquant) - 源码和问题反馈
-- [Gitee 仓库](https://gitee.com/ssquant/ssquant) - 国内推荐，访问更快
-- [用户手册](用户手册.md) - 完整使用教程
-- [API参考](API参考手册.md) - 所有API详解
-
----
-
-## 📝 更新日志
-
-### v0.3.7 (2025-12)
-
-- 🔄 移除构建脚本和冗余文件
-- ✅ 修复 CTP 登录报错乱码问题
-- ✅ 优化项目结构
-
-### v0.3.6 (2025-12)
-
-- ✅ 修复 CTP 登录报错乱码问题 (Windows下GBK/GB18030解码)
-- ✅ 优化 SIMNOW 和实盘客户端的错误信息显示
-
-### v0.3.0 (2025-12)
-
-- ✅ 完整的TICK流双驱动模式
-- ✅ 多品种多周期支持
-- ✅ 订单撤单重发机制
-- ✅ 实时回调系统（on_trade/on_order/on_cancel）
-- ✅ 动态price_tick和offset_ticks
-- ✅ 统一的API接口
-- ✅ 19个策略示例
-
----
-
-**开始你的量化交易之旅！** 🚀
-
-查看 [用户手册.md](https://github.com/songshuquant/ssquant/blob/main/%E7%94%A8%E6%88%B7%E6%89%8B%E5%86%8C.md) 了解详细使用方法。
-=======
 SSQuant 使用 MIT License。
 
 期货交易具有高风险。SSQuant 是研究和工程框架，不构成投资建议。实盘前请充分回测和 SIMNOW 验证，并从小资金开始。
->>>>>>> origin/main

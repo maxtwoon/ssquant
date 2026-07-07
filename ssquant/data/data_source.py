@@ -705,7 +705,7 @@ class DataSource:
         # 用 raw_price 计算 P&L，避免复权因子在换月点污染
         self._apply_trade_to_account_state(action, raw_price, volume)
 
-    def get_price_by_type(self, order_type='bar_close'):
+    def get_price_by_type(self, order_type='next_bar_open'):
         """
         根据订单类型获取价格
 
@@ -777,6 +777,69 @@ class DataSource:
                         return self.data.iloc[self.current_idx]['close']
         return None
 
+    def _apply_slippage_to_fill(self, action: str, price: float):
+        """对成交价应用滑点 (买入加滑点、卖出减滑点)。
+
+        v0.4.7 修复 #3：bar_close 成交路径之前不计滑点，与待执行订单口径不一致。
+        现在统一走这个 helper，回测口径对齐实盘交易成本。
+
+        Returns:
+            (price_with_slippage, slippage_per_unit) — slippage_per_unit 用于 add_trade
+            计算 slippage_cost 字段。
+        """
+        slippage_per_unit = self.slippage_ticks * self.price_tick  # raw 价单位
+        slippage_in_price_space = slippage_per_unit
+        if self._adjust_factor_arr is not None:
+            _i = self.current_idx
+            if 0 <= _i < self._adjust_factor_arr.shape[0]:
+                _f = float(self._adjust_factor_arr[_i])
+                if _f > 0:
+                    slippage_in_price_space = slippage_per_unit * _f
+        if action in ("开多", "平空", "平空开多"):
+            price = price + slippage_in_price_space
+        elif action in ("开空", "平多", "平多开空"):
+            price = price - slippage_in_price_space
+        return price, slippage_per_unit
+
+    def _check_limit_triggered(self, action: str, limit_price: float) -> bool:
+        """检查当前 bar 是否触发了 limit 订单的成交条件。
+
+        买入方向 (开多/平空/平空开多)：bar.low <= limit_price → 触价
+        卖出方向 (开空/平多/平多开空)：bar.high >= limit_price → 触价
+
+        v0.4.7 新增。修复了 limit 订单被当作 next-bar 无条件成交的回测失真。
+        """
+        if limit_price is None:
+            return False
+        # 取当前 bar 的 high/low
+        bar_high = None
+        bar_low = None
+        if self._has_array_cache and 0 <= self.current_idx < self._data_len:
+            if self._high_arr is not None:
+                bar_high = float(self._high_arr[self.current_idx])
+            if self._low_arr is not None:
+                bar_low = float(self._low_arr[self.current_idx])
+        elif not self.data.empty and self.current_idx < len(self.data):
+            row = self.data.iloc[self.current_idx]
+            if 'high' in self.data.columns:
+                bar_high = float(row['high'])
+            if 'low' in self.data.columns:
+                bar_low = float(row['low'])
+
+        # 兜底：拿不到 high/low 时退化为当前价（仅触发等于的边界情况）
+        if bar_high is None or bar_low is None:
+            cur = self.get_current_price()
+            if cur is None:
+                return False
+            bar_high = bar_high if bar_high is not None else cur
+            bar_low = bar_low if bar_low is not None else cur
+
+        if action in ('开多', '平空', '平空开多'):
+            return bar_low <= limit_price
+        elif action in ('开空', '平多', '平多开空'):
+            return bar_high >= limit_price
+        return False
+
     def _process_pending_orders(self, log_callback=None):
         """处理待执行的订单"""
         if not self.pending_orders:
@@ -800,19 +863,44 @@ class DataSource:
                 volume = order['volume']
                 reason = order['reason']
 
-                # 根据订单类型获取执行价格
-                # 如果已经预先计算了价格，就使用那个价格
-                if 'price' in order and order['price'] is not None:
-                    price = order['price']
+                # === FIX #1 (v0.4.7): Limit 订单按 high/low 触价才成交 ===
+                # 历史 bug：limit 订单被当成 next-bar 无条件成交，
+                # 不检查 bar 高低是否触达 limit price → 回测失真严重。
+                # 修复：触价才成交，未触价顺延到下一根 bar；240 bar 仍未触价则取消。
+                if order_type == 'limit':
+                    limit_price = order.get('price')
+                    if limit_price is None:
+                        if log_callback and debug_mode:
+                            log_callback(f"{self.symbol} {self.kline_period} 取消 limit 订单: 缺价")
+                        order['reserved_funds'] = 0.0
+                        orders_to_remove.append(i)
+                        continue
+                    if not self._check_limit_triggered(action, limit_price):
+                        order['execution_time'] = self.current_idx + 1  # 顺延到下一根
+                        order['_age'] = order.get('_age', 0) + 1
+                        if order['_age'] > 240:
+                            if log_callback and debug_mode:
+                                log_callback(f"{self.symbol} {self.kline_period} 取消 limit 订单: "
+                                             f"超过 240 bar 未触价 (限价 {limit_price})")
+                            order['reserved_funds'] = 0.0
+                            orders_to_remove.append(i)
+                        continue
+                    # 触价：按 limit 价成交，不加滑点
+                    price = limit_price
                 else:
-                    # 否则根据订单类型获取当前价格
-                    price = self.get_price_by_type(order_type)
-                    if price is None:
-                        # 如果仍然无法获取价格，则使用当前价格
-                        price = self.get_current_price()
+                    # 根据订单类型获取执行价格
+                    # 如果已经预先计算了价格，就使用那个价格
+                    if 'price' in order and order['price'] is not None:
+                        price = order['price']
+                    else:
+                        # 否则根据订单类型获取当前价格
+                        price = self.get_price_by_type(order_type)
                         if price is None:
-                            # 如果完全无法获取价格，跳过此订单
-                            continue
+                            # 如果仍然无法获取价格，则使用当前价格
+                            price = self.get_current_price()
+                            if price is None:
+                                # 如果完全无法获取价格，跳过此订单
+                                continue
 
                 # 应用滑点成本（买入加滑点，卖出减滑点）
                 # v0.4.6：滑点 = ticks × price_tick 是 raw 价单位（合约真实最小变动价位）。
@@ -821,20 +909,24 @@ class DataSource:
                 # 导致 hfq/qfq 路径下实际 P&L 滑点偏小。
                 # 解法：把滑点先按当前 factor 放大到复权单位，
                 # 这样 raw_fill = (raw_market × F + slip × F) / F = raw_market + slip，与不复权完全一致。
-                slippage_per_unit = self.slippage_ticks * self.price_tick  # 每单位滑点金额（raw 价单位）
-                slippage_in_price_space = slippage_per_unit
-                if self._adjust_factor_arr is not None:
-                    _i = self.current_idx
-                    if 0 <= _i < self._adjust_factor_arr.shape[0]:
-                        _f = float(self._adjust_factor_arr[_i])
-                        if _f > 0:
-                            slippage_in_price_space = slippage_per_unit * _f
-                if action in ["开多", "平空", "平空开多"]:
-                    # 买入方向：价格上滑
-                    price = price + slippage_in_price_space
-                elif action in ["开空", "平多", "平多开空"]:
-                    # 卖出方向：价格下滑
-                    price = price - slippage_in_price_space
+                # FIX #1 (v0.4.7): limit 订单不加滑点（限价单按指定价成交）
+                if order_type == 'limit':
+                    slippage_per_unit = 0.0
+                else:
+                    slippage_per_unit = self.slippage_ticks * self.price_tick  # 每单位滑点金额（raw 价单位）
+                    slippage_in_price_space = slippage_per_unit
+                    if self._adjust_factor_arr is not None:
+                        _i = self.current_idx
+                        if 0 <= _i < self._adjust_factor_arr.shape[0]:
+                            _f = float(self._adjust_factor_arr[_i])
+                            if _f > 0:
+                                slippage_in_price_space = slippage_per_unit * _f
+                    if action in ["开多", "平空", "平空开多"]:
+                        # 买入方向：价格上滑
+                        price = price + slippage_in_price_space
+                    elif action in ["开空", "平多", "平多开空"]:
+                        # 卖出方向：价格下滑
+                        price = price - slippage_in_price_space
 
                 if action in ["开多", "开空"]:
                     reserved_funds = float(order.get('reserved_funds', 0.0) or 0.0)
@@ -914,9 +1006,6 @@ class DataSource:
         # 移除已执行的订单（从后往前移除，避免索引问题）
         for i in sorted(orders_to_remove, reverse=True):
             self.pending_orders.pop(i)
-<<<<<<< HEAD
-        
-=======
 
         # P9：成交分支已经在每次 fill 之后即时同步过 _sync_backtest_account（保留跨 fill
         # 的资金校验语义），这里的最终 sync 是冗余的，移除。reject/skip 分支只是登记
@@ -924,8 +1013,7 @@ class DataSource:
         # 注：主循环（backtest_core.py 主循环每根 Bar 末尾）也会再调一次
         # _update_backtest_account，最终 account_info 仍是最新的。
 
->>>>>>> origin/main
-    def buy(self, volume: int = 1, reason: str = "", log_callback=None, order_type='bar_close', offset_ticks: Optional[int] = None, price: Optional[float] = None):
+    def buy(self, volume: int = 1, reason: str = "", log_callback=None, order_type='next_bar_open', offset_ticks: Optional[int] = None, price: Optional[float] = None):
         """
         开多仓
 
@@ -943,11 +1031,7 @@ class DataSource:
                 - 'market': 市价单，按ask1价格成交（买入用卖一价）
             offset_ticks: 价格偏移tick数
             price: 限价单价格（仅当order_type='limit'时有效）
-<<<<<<< HEAD
-        
-=======
 
->>>>>>> origin/main
         Returns:
             bool: 是否成功下单
         """
@@ -959,6 +1043,8 @@ class DataSource:
             price = self.get_current_price()
             if price is None:
                 return False
+            # FIX #3 (v0.4.7): bar_close 路径补滑点 (此前不计,与待执行口径不一致)
+            price, slippage_per_unit = self._apply_slippage_to_fill("开多", price)
 
             actual_volume, _ = self._fit_open_volume_to_funds(volume, price)
             if actual_volume <= 0:
@@ -978,7 +1064,7 @@ class DataSource:
             self._update_pos(log_callback)
 
             # 记录交易
-            self.add_trade("开多", price, volume, reason,
+            self.add_trade("开多", price, volume, reason, slippage_cost=slippage_per_unit,
                            raw_price=self._unadjust_price(price))
             self._sync_backtest_account()
             return True
@@ -1026,9 +1112,6 @@ class DataSource:
             # 下一K线价格下单，添加到待执行队列
             if price is None:
                 price = self.get_price_by_type(order_type)
-<<<<<<< HEAD
-            
-=======
             estimate_price = price if price is not None else self.get_current_price()
             actual_volume, reserved_funds = self._fit_open_volume_to_funds(volume, estimate_price)
             price_str = f"{estimate_price:.2f}" if estimate_price is not None else "未知"
@@ -1043,7 +1126,6 @@ class DataSource:
                 log_callback(f"{self.symbol} {self.kline_period} 开多订单资金不足: {volume}手自动调整为{actual_volume}手")
             volume = actual_volume
 
->>>>>>> origin/main
             # 注意：如果是next_bar_open/high/low/close，价格可能为None，因为下一K线的数据尚未加载
             # 但我们仍然可以添加到待执行队列，等待下一K线时执行，再根据order_type获取正确的价格
 
@@ -1064,12 +1146,8 @@ class DataSource:
 
             self._sync_backtest_account()
             return True
-<<<<<<< HEAD
-        
-=======
 
->>>>>>> origin/main
-    def sell(self, volume: Optional[int] = None, reason: str = "", log_callback=None, order_type='bar_close', offset_ticks: Optional[int] = None, price: Optional[float] = None):
+    def sell(self, volume: Optional[int] = None, reason: str = "", log_callback=None, order_type='next_bar_open', offset_ticks: Optional[int] = None, price: Optional[float] = None):
         """
         平多仓
 
@@ -1080,11 +1158,7 @@ class DataSource:
             order_type (str): 订单类型，可选值同buy函数
             offset_ticks: 价格偏移tick数
             price: 限价单价格（仅当order_type='limit'时有效）
-<<<<<<< HEAD
-        
-=======
 
->>>>>>> origin/main
         Returns:
             bool: 是否成功下单
         """
@@ -1096,6 +1170,8 @@ class DataSource:
             price = self.get_current_price()
             if price is None:
                 return False
+            # FIX #3 (v0.4.7): bar_close 平多补滑点
+            price, slippage_per_unit = self._apply_slippage_to_fill("平多", price)
 
             if volume is None:
                 volume = max(0, self.current_pos)
@@ -1114,7 +1190,7 @@ class DataSource:
             self._update_pos(log_callback)
 
             # 记录交易
-            self.add_trade("平多", price, actual_volume, reason,
+            self.add_trade("平多", price, actual_volume, reason, slippage_cost=slippage_per_unit,
                            raw_price=self._unadjust_price(price))
             self._sync_backtest_account()
             return True
@@ -1189,12 +1265,8 @@ class DataSource:
                 log_callback(f"{self.symbol} {self.kline_period} 添加待执行订单: 平多 {actual_volume}手 订单类型:{order_type} 预计价格:{price_str} 原因:{reason}")
 
             return True
-<<<<<<< HEAD
-        
-=======
 
->>>>>>> origin/main
-    def sellshort(self, volume: int = 1, reason: str = "", log_callback=None, order_type='bar_close', offset_ticks: Optional[int] = None, price: Optional[float] = None):
+    def sellshort(self, volume: int = 1, reason: str = "", log_callback=None, order_type='next_bar_open', offset_ticks: Optional[int] = None, price: Optional[float] = None):
         """
         开空仓
 
@@ -1205,11 +1277,7 @@ class DataSource:
             order_type (str): 订单类型，可选值同buy函数
             offset_ticks: 价格偏移tick数
             price: 限价单价格（仅当order_type='limit'时有效）
-<<<<<<< HEAD
-        
-=======
 
->>>>>>> origin/main
         Returns:
             bool: 是否成功下单
         """
@@ -1221,6 +1289,8 @@ class DataSource:
             price = self.get_current_price()
             if price is None:
                 return False
+            # FIX #3 (v0.4.7): bar_close 开空补滑点
+            price, slippage_per_unit = self._apply_slippage_to_fill("开空", price)
 
             actual_volume, _ = self._fit_open_volume_to_funds(volume, price)
             if actual_volume <= 0:
@@ -1240,7 +1310,7 @@ class DataSource:
             self._update_pos(log_callback)
 
             # 记录交易
-            self.add_trade("开空", price, volume, reason,
+            self.add_trade("开空", price, volume, reason, slippage_cost=slippage_per_unit,
                            raw_price=self._unadjust_price(price))
             self._sync_backtest_account()
             return True
@@ -1288,8 +1358,6 @@ class DataSource:
             # 下一K线价格下单，添加到待执行队列
             if price is None:
                 price = self.get_price_by_type(order_type)
-<<<<<<< HEAD
-=======
             estimate_price = price if price is not None else self.get_current_price()
             actual_volume, reserved_funds = self._fit_open_volume_to_funds(volume, estimate_price)
             price_str = f"{estimate_price:.2f}" if estimate_price is not None else "未知"
@@ -1303,7 +1371,6 @@ class DataSource:
             if actual_volume < volume and log_callback and debug_mode:
                 log_callback(f"{self.symbol} {self.kline_period} 开空订单资金不足: {volume}手自动调整为{actual_volume}手")
             volume = actual_volume
->>>>>>> origin/main
             # 注意：如果是next_bar_open/high/low/close，价格可能为None，因为下一K线的数据尚未加载
 
             # 添加到待执行队列
@@ -1323,12 +1390,8 @@ class DataSource:
 
             self._sync_backtest_account()
             return True
-<<<<<<< HEAD
-        
-=======
 
->>>>>>> origin/main
-    def buycover(self, volume: Optional[int] = None, reason: str = "", log_callback=None, order_type='bar_close', offset_ticks: Optional[int] = None, price: Optional[float] = None):
+    def buycover(self, volume: Optional[int] = None, reason: str = "", log_callback=None, order_type='next_bar_open', offset_ticks: Optional[int] = None, price: Optional[float] = None):
         """
         平空仓
 
@@ -1339,11 +1402,7 @@ class DataSource:
             order_type (str): 订单类型，可选值同buy函数
             offset_ticks: 价格偏移tick数
             price: 限价单价格（仅当order_type='limit'时有效）
-<<<<<<< HEAD
-        
-=======
 
->>>>>>> origin/main
         Returns:
             bool: 是否成功下单
         """
@@ -1355,6 +1414,8 @@ class DataSource:
             price = self.get_current_price()
             if price is None:
                 return False
+            # FIX #3 (v0.4.7): bar_close 平空补滑点
+            price, slippage_per_unit = self._apply_slippage_to_fill("平空", price)
 
             if volume is None:
                 volume = max(0, -self.current_pos)
@@ -1373,7 +1434,7 @@ class DataSource:
             self._update_pos(log_callback)
 
             # 记录交易
-            self.add_trade("平空", price, actual_volume, reason,
+            self.add_trade("平空", price, actual_volume, reason, slippage_cost=slippage_per_unit,
                            raw_price=self._unadjust_price(price))
             self._sync_backtest_account()
             return True
@@ -1449,7 +1510,7 @@ class DataSource:
 
             return True
 
-    def reverse_pos(self, reason: str = "", log_callback=None, order_type='bar_close'):
+    def reverse_pos(self, reason: str = "", log_callback=None, order_type='next_bar_open'):
         """
         反手（多转空，空转多）
 
@@ -1531,7 +1592,7 @@ class DataSource:
         self._sync_backtest_account()
         return True
 
-    def close_all(self, reason: str = "", log_callback=None, order_type='bar_close'):
+    def close_all(self, reason: str = "", log_callback=None, order_type='next_bar_open'):
         """
         平掉所有持仓
 

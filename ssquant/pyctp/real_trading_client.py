@@ -122,14 +122,9 @@ class RealTradingMdSpi(MdSpi):
     def OnRspUserLogin(self, pRspUserLogin, pRspInfo, nRequestID, bIsLast):
         """行情登录响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
-<<<<<<< HEAD
-            error_msg = self.client._decode_error_msg(pRspInfo.ErrorMsg)
-            full_msg = self.client._get_error_desc(pRspInfo.ErrorID, error_msg)
-=======
             # helper 定义在 TraderSpi 上,MdSpi 内部没有 —— 跨 Spi 走 client.trader_spi
             error_msg = self.client.trader_spi._decode_error_msg(pRspInfo.ErrorMsg)
             full_msg = self.client.trader_spi._format_error_output(pRspInfo.ErrorID, error_msg)
->>>>>>> origin/main
             print(f"[行情] 登录失败: {full_msg}")
             return
         
@@ -151,14 +146,9 @@ class RealTradingMdSpi(MdSpi):
     def OnRspSubMarketData(self, pSpecificInstrument, pRspInfo, nRequestID, bIsLast):
         """订阅行情响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
-<<<<<<< HEAD
-            error_msg = self.client._decode_error_msg(pRspInfo.ErrorMsg)
-            full_msg = self.client._get_error_desc(pRspInfo.ErrorID, error_msg)
-=======
             # helper 定义在 TraderSpi 上,MdSpi 内部没有 —— 跨 Spi 走 client.trader_spi
             error_msg = self.client.trader_spi._decode_error_msg(pRspInfo.ErrorMsg)
             full_msg = self.client.trader_spi._format_error_output(pRspInfo.ErrorID, error_msg)
->>>>>>> origin/main
             print(f"[行情] 订阅失败: {full_msg}")
         else:
             print(f"[行情] 订阅成功: {pSpecificInstrument.InstrumentID}")
@@ -288,10 +278,6 @@ class RealTradingTraderSpi(TraderSpi):
         """认证响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-<<<<<<< HEAD
-            full_msg = self.client._get_error_desc(pRspInfo.ErrorID, error_msg)
-            print(f"[交易] 认证失败: {full_msg}")
-=======
             full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
             print(f"[交易] 认证失败: {full_msg}")
 
@@ -304,7 +290,6 @@ class RealTradingTraderSpi(TraderSpi):
             # 读单个 int 在 CPython 下原子,无需持 _conn_epoch_lock (锁只保护 _bump_conn_epoch 的 read-modify-write)
             scheduled_epoch = self.client._conn_epoch
             threading.Timer(delay, self._retry_authenticate, args=[scheduled_epoch]).start()
->>>>>>> origin/main
             return
 
         self._auth_retry_count = 0  # 认证成功，重置计数器
@@ -348,11 +333,7 @@ class RealTradingTraderSpi(TraderSpi):
         """交易登录响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-<<<<<<< HEAD
-            full_msg = self.client._get_error_desc(pRspInfo.ErrorID, error_msg)
-=======
             full_msg = self._get_error_desc(pRspInfo.ErrorID, error_msg)
->>>>>>> origin/main
             print(f"[交易] 登录失败: {full_msg}")
             return
         
@@ -407,11 +388,7 @@ class RealTradingTraderSpi(TraderSpi):
         """结算单确认响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-<<<<<<< HEAD
-            full_msg = self.client._get_error_desc(pRspInfo.ErrorID, error_msg)
-=======
             full_msg = self._get_error_desc(pRspInfo.ErrorID, error_msg)
->>>>>>> origin/main
             print(f"[交易] 结算单确认失败: {full_msg}")
             return
         
@@ -574,11 +551,7 @@ class RealTradingTraderSpi(TraderSpi):
         """资金查询响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-<<<<<<< HEAD
-            full_msg = self.client._get_error_desc(pRspInfo.ErrorID, error_msg)
-=======
             full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
->>>>>>> origin/main
             print(f"[查询] 资金查询失败: {full_msg}")
             return
         
@@ -602,11 +575,7 @@ class RealTradingTraderSpi(TraderSpi):
         """持仓查询响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-<<<<<<< HEAD
-            full_msg = self.client._get_error_desc(pRspInfo.ErrorID, error_msg)
-=======
             full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
->>>>>>> origin/main
             print(f"[持仓] 查询失败: {full_msg}")
             return
         
@@ -665,11 +634,7 @@ class RealTradingTraderSpi(TraderSpi):
         """订单查询响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-<<<<<<< HEAD
-            full_msg = self.client._get_error_desc(pRspInfo.ErrorID, error_msg)
-=======
             full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
->>>>>>> origin/main
             print(f"[查询] 订单查询失败: {full_msg}")
             return
         
@@ -700,11 +665,7 @@ class RealTradingTraderSpi(TraderSpi):
         """成交查询响应"""
         if pRspInfo and pRspInfo.ErrorID != 0:
             error_msg = self._decode_error_msg(pRspInfo.ErrorMsg)
-<<<<<<< HEAD
-            full_msg = self.client._get_error_desc(pRspInfo.ErrorID, error_msg)
-=======
             full_msg = self._format_error_output(pRspInfo.ErrorID, error_msg)
->>>>>>> origin/main
             print(f"[查询] 成交查询失败: {full_msg}")
             return
         

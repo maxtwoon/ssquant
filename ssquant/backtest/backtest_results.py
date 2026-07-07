@@ -209,40 +209,80 @@ class BacktestResultCalculator:
         self.results = {}
 
     def _get_combined_equity_curve(self, results):
-        """获取综合权益曲线（所有数据源权益相加）"""
-        all_equity_curves = []
+        """合成跨品种权益曲线 (FIX #4, v0.4.7)。
 
+        改造前：交集对齐 → 多品种交易时段不重叠时丢点；fillna(method='ffill') deprecated。
+        改造后：并集对齐 + ffill (没数据的时间点权益保持上一根)；同时返回总初始资金,
+        供 calculate_performance 直接计算组合层面指标 (不再做简单平均)。
+
+        Returns:
+            dict {
+                'equity': pd.Series,   # 合成权益曲线
+                'total_initial': float, # 总初始资金 (∑ 各品种 initial_capital)
+                'per_symbol': dict[str -> pd.Series],  # 各品种独立权益曲线
+                'per_symbol_initial': dict[str -> float],  # 各品种初始资金
+            }
+        """
+        per_symbol = {}
+        per_symbol_initial = {}
+        total_initial = 0.0
         for key, result in results.items():
-            if isinstance(result, dict) and 'equity_curve' in result and isinstance(result['equity_curve'], pd.Series):
-                all_equity_curves.append(result['equity_curve'])
+            if not isinstance(result, dict):
+                continue
+            ec = result.get('equity_curve')
+            if not isinstance(ec, pd.Series) or ec.empty:
+                continue
+            per_symbol[str(key)] = ec
+            ic = float(result.get('initial_capital', 0.0) or 0.0)
+            per_symbol_initial[str(key)] = ic
+            total_initial += ic
 
-        if not all_equity_curves:
-            return pd.Series(dtype=float)
+        if not per_symbol:
+            return {
+                'equity': pd.Series(dtype=float),
+                'total_initial': 0.0,
+                'per_symbol': {},
+                'per_symbol_initial': {},
+            }
+        if len(per_symbol) == 1:
+            (sym, curve), = per_symbol.items()
+            return {
+                'equity': curve,
+                'total_initial': total_initial,
+                'per_symbol': per_symbol,
+                'per_symbol_initial': per_symbol_initial,
+            }
 
-        if len(all_equity_curves) == 1:
-            return all_equity_curves[0]
+        # 并集对齐 + 各曲线 ffill (用每个品种自己的初始资金做 bfill 兜底)
+        all_idx = None
+        for c in per_symbol.values():
+            all_idx = c.index if all_idx is None else all_idx.union(c.index)
+        all_idx = all_idx.sort_values()
 
-        # 使用交集：只保留所有数据源都有数据的时间点
-        common_indices = all_equity_curves[0].index
-        for curve in all_equity_curves[1:]:
-            common_indices = common_indices.intersection(curve.index)
+        combined = pd.Series(0.0, index=all_idx)
+        for sym, curve in per_symbol.items():
+            aligned = curve.reindex(all_idx).ffill()
+            # 前面没数据的时间点 (该品种还没开始交易) -> 用 initial_capital 兜底,
+            # 这样 combined 权益曲线物理意义清晰: t 时刻所有"已开账"品种权益之和
+            init_cap = per_symbol_initial.get(sym, 0.0)
+            aligned = aligned.fillna(init_cap)
+            combined = combined + aligned
 
-        if len(common_indices) == 0:
-            base_curve = max(all_equity_curves, key=len)
-            combined = base_curve.copy()
-            for curve in all_equity_curves:
-                if curve is not base_curve:
-                    aligned = curve.reindex(base_curve.index)
-                    combined = combined + aligned.fillna(method='ffill').fillna(method='bfill')
-            return combined
-        else:
-            combined = pd.Series(0.0, index=common_indices)
-            for curve in all_equity_curves:
-                combined = combined + curve.reindex(common_indices)
-            return combined
+        return {
+            'equity': combined,
+            'total_initial': total_initial,
+            'per_symbol': per_symbol,
+            'per_symbol_initial': per_symbol_initial,
+        }
 
     def calculate_performance(self, results):
         """计算回测性能指标
+
+        v0.4.7 FIX #4: 组合级别指标 (total_return / annual_return / sharpe / MDD)
+        直接从合成权益曲线计算,不再对单品种指标做简单平均。
+
+        v0.4.7 FIX #5: 不再把权益裁剪到 0.01/0.0001 floor。负权益作为风险事件
+        独立写入 performance['blowup_events'],便于风控审计。
 
         Args:
             results: 回测结果字典
@@ -253,74 +293,142 @@ class BacktestResultCalculator:
         if not results:
             return {}
 
-        # 提取关键绩效指标
         performance = {}
 
-        # 如果存在多个数据源，则计算平均指标
-        total_return = 0
-        annual_return = 0
-        sharpe_ratio = 0
-        win_rate = 0
+        # === 单品种交易统计 (累加,不平均) ===
         total_trades = 0
         winning_trades = 0
         losing_trades = 0
-        profit_factor = 0
+        sum_profit_factor = 0.0
+        sum_win_rate = 0.0
+        symbol_count = 0
+        per_symbol_summary = []
 
-        # 计数器
-        count = 0
-
-        # 遍历所有结果
         for key, result in results.items():
-            if isinstance(result, dict) and 'net_value' in result:
-                count += 1
+            if not isinstance(result, dict) or 'net_value' not in result:
+                continue
+            symbol_count += 1
+            net_value = float(result.get('net_value', 1.0))  # FIX #5: 不再 clip
+            total_trades += int(result.get('total_trades', 0) or 0)
+            winning_trades += int(result.get('win_trades', 0) or 0)
+            losing_trades += int(result.get('loss_trades', 0) or 0)
+            sum_profit_factor += float(result.get('profit_factor', 0) or 0)
+            sum_win_rate += float(result.get('win_rate', 0) or 0) * 100
+            per_symbol_summary.append({
+                'symbol': str(key),
+                'net_value': net_value,
+                'initial_capital': float(result.get('initial_capital', 0) or 0),
+                'final_equity': float(result.get('final_equity', 0) or 0),
+                'annual_return': float(result.get('annual_return', 0) or 0),
+                'sharpe_ratio': float(result.get('sharpe_ratio', 0) or 0),
+                'max_drawdown_pct': float(result.get('max_drawdown_pct', 0) or 0),
+            })
 
-                # 确保净值不小于0.0001（防止出现负净值）
-                net_value = max(0.0001, result.get('net_value', 1.0))
-                result['net_value'] = net_value  # 修正结果中的净值
+        # === 组合层面指标 (FIX #4: 直接从合成曲线计算) ===
+        combo = self._get_combined_equity_curve(results)
+        combined_equity = combo['equity']
+        total_initial = combo['total_initial']
 
-                # 累加绩效指标
-                total_return += (net_value - 1.0) * 100  # 转换为百分比
-                annual_return += result.get('annual_return', 0)
-                sharpe_ratio += result.get('sharpe_ratio', 0)
-                win_rate += result.get('win_rate', 0) * 100  # 转换为百分比
+        if not combined_equity.empty and total_initial > 0:
+            final_combined = float(combined_equity.iloc[-1])
+            total_return = (final_combined / total_initial - 1.0) * 100.0
+            performance['total_return'] = total_return
+            performance['portfolio_final_equity'] = final_combined
+            performance['portfolio_initial_capital'] = total_initial
 
-                # 累加交易统计
-                total_trades += result.get('total_trades', 0)
-                winning_trades += result.get('win_trades', 0)
-                losing_trades += result.get('loss_trades', 0)
-                profit_factor += result.get('profit_factor', 0)
+            # 年化收益 (按交易日数推算)
+            try:
+                start_t = combined_equity.index[0]
+                end_t = combined_equity.index[-1]
+                if hasattr(start_t, 'to_pydatetime'):
+                    days = (end_t - start_t).total_seconds() / 86400.0
+                else:
+                    days = float(len(combined_equity))
+                if days > 0:
+                    years = max(days / 365.25, 1e-9)
+                    performance['annual_return'] = (
+                        ((final_combined / total_initial) ** (1.0 / years) - 1.0) * 100.0
+                        if final_combined > 0 else -100.0
+                    )
+                else:
+                    performance['annual_return'] = 0.0
+            except Exception:
+                performance['annual_return'] = 0.0
 
-        # 基于综合权益曲线计算最大回撤（而非单品种平均）
-        combined_equity = self._get_combined_equity_curve(results)
-        if not combined_equity.empty and combined_equity.max() > 0:
-            combined_equity = combined_equity.clip(lower=0.01)
-            cummax = combined_equity.cummax()
-            drawdown = cummax - combined_equity
-            performance['max_drawdown'] = drawdown.max()
-            performance['max_drawdown_pct'] = (drawdown / cummax).max() * 100
+            # Sharpe (按 bar 频率计算; rf=0)
+            try:
+                rets = combined_equity.pct_change().dropna()
+                if len(rets) > 1 and rets.std() > 0:
+                    # 简化:按每日 252 个 trading day 年化 (不区分 bar 频率)
+                    performance['sharpe_ratio'] = float(rets.mean() / rets.std() * (252 ** 0.5))
+                else:
+                    performance['sharpe_ratio'] = 0.0
+            except Exception:
+                performance['sharpe_ratio'] = 0.0
+
+            # MDD (FIX #5: 不 clip 负权益)
+            if combined_equity.max() > 0:
+                cummax = combined_equity.cummax()
+                drawdown = cummax - combined_equity
+                performance['max_drawdown'] = float(drawdown.max())
+                # 用 cummax 做分母,负权益时 dd_pct 可能 > 100%, 此时只取 100% 上限
+                ratio = drawdown / cummax.replace(0, float('nan'))
+                performance['max_drawdown_pct'] = float(ratio.max() * 100.0) if not ratio.empty else 0.0
+            else:
+                performance['max_drawdown'] = 0.0
+                performance['max_drawdown_pct'] = 0.0
         else:
-            performance['max_drawdown'] = 0
-            performance['max_drawdown_pct'] = 0
+            performance['total_return'] = 0.0
+            performance['annual_return'] = 0.0
+            performance['sharpe_ratio'] = 0.0
+            performance['max_drawdown'] = 0.0
+            performance['max_drawdown_pct'] = 0.0
+            performance['portfolio_final_equity'] = total_initial
+            performance['portfolio_initial_capital'] = total_initial
 
-        # 计算平均值
-        if count > 0:
-            performance['total_return'] = total_return / count
-            performance['annual_return'] = annual_return / count
-            performance['sharpe_ratio'] = sharpe_ratio / count
-            performance['win_rate'] = win_rate / count
-
-            # 交易统计
-            trade_stats = {
+        # 单品种胜率仍用平均 (各品种独立账户,胜率本就是品种属性)
+        if symbol_count > 0:
+            performance['win_rate'] = sum_win_rate / symbol_count
+            performance['trade_stats'] = {
                 'total_trades': total_trades,
                 'winning_trades': winning_trades,
                 'losing_trades': losing_trades,
-                'profit_factor': profit_factor / count if count > 0 else 0
+                'profit_factor': sum_profit_factor / symbol_count,
             }
-            performance['trade_stats'] = trade_stats
+        performance['per_symbol_summary'] = per_symbol_summary
 
-        # 添加性能指标到结果中
+        # === FIX #5: 爆仓 / 负权益风险事件检测 ===
+        blowup_events = []
+        # 组合层面爆仓
+        if not combined_equity.empty:
+            below_zero = combined_equity[combined_equity <= 0]
+            if not below_zero.empty:
+                first_t = below_zero.index[0]
+                blowup_events.append({
+                    'level': 'portfolio',
+                    'symbol': '__combined__',
+                    'first_time': str(first_t),
+                    'min_equity': float(combined_equity.min()),
+                })
+        # 单品种爆仓
+        for sym, curve in combo['per_symbol'].items():
+            below_zero = curve[curve <= 0]
+            if not below_zero.empty:
+                blowup_events.append({
+                    'level': 'symbol',
+                    'symbol': sym,
+                    'first_time': str(below_zero.index[0]),
+                    'min_equity': float(curve.min()),
+                    'initial_capital': combo['per_symbol_initial'].get(sym, 0.0),
+                })
+        if blowup_events:
+            performance['blowup_events'] = blowup_events
+            performance['has_blowup'] = True
+            self.log(f"⚠ 检测到 {len(blowup_events)} 个爆仓 / 负权益事件 — 详见 performance['blowup_events']")
+        else:
+            performance['has_blowup'] = False
+
         results['performance'] = performance
-
         return performance
 
     def log(self, message):
@@ -647,11 +755,10 @@ class BacktestResultCalculator:
             final_equity = equity_curve.iloc[-1] if not equity_curve.empty else initial_capital
             gross_final_equity = gross_equity_curve.iloc[-1] if not gross_equity_curve.empty else initial_capital
 
-            # 确保期末权益不小于0.01（为了避免负净值）
-            final_equity = max(0.01, final_equity)
-            gross_final_equity = max(0.01, gross_final_equity)
-
-            net_value = final_equity / initial_capital
+            # FIX #5 (v0.4.7): 不再把 final_equity / equity_curve 裁剪到 0.01。
+            # 负权益是真实的爆仓信号,裁剪只会让风控报告失真;改为在 calculate_performance
+            # 里把负权益事件汇总到 performance['blowup_events']。
+            net_value = final_equity / initial_capital if initial_capital > 0 else 0.0
 
             # 重新计算利润指标，确保与权益曲线一致
             # 净利润 = 期末权益 - 初始资金（基于 equity_curve，已扣除手续费和滑点）
@@ -659,15 +766,15 @@ class BacktestResultCalculator:
             # 毛利润 = 净利润 + 手续费 + 滑点（完全不含任何成本的原始盈亏）
             total_amount_profit = total_net_profit + total_commission + total_slippage
 
-            # 计算最大回撤（使用修改后的权益曲线）
+            # 计算最大回撤
+            # FIX #5: 不再 clip(lower=0.01)。权益曲线中负值反映真实爆仓,正常进入 MDD 计算。
             if not equity_curve.empty and equity_curve.max() > 0:
-                # 对权益曲线进行修正，不允许出现负值
-                equity_curve = equity_curve.clip(lower=0.01)
-
                 cummax = equity_curve.cummax()
                 drawdown = (cummax - equity_curve)
                 max_drawdown = drawdown.max()
-                max_drawdown_pct = (drawdown / cummax).max() * 100
+                # 分母为 0 时避免 inf
+                ratio = drawdown / cummax.replace(0, float('nan'))
+                max_drawdown_pct = float(ratio.max() * 100) if not ratio.empty else 0
             else:
                 max_drawdown = 0
                 max_drawdown_pct = 0
