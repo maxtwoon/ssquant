@@ -35,7 +35,15 @@ from ssquant.config.trading_config import get_api_auth
 # period 示例: 1M, 5M, 15M, 1H, D, W, M 等；adjust 示例: raw, hfq, qfq
 TABLE_PATTERN = re.compile(r'^(.+)_(\d+[MmHhDWM]|\d+[mhd])_(raw|hfq|qfq)$')
 
-DEFAULT_SLEEP = 0.5  # 每个 symbol 处理完休息秒数，避免对服务器造成压力
+DEFAULT_SLEEP = 1.0  # 每个 symbol 处理完休息秒数，避免触发服务端 429 限流
+
+# 默认跳过的品种列表：data_server 已知无后续数据或数据质量极差，
+# 全库更新时跳过以节省时间和避免无意义重试。
+# 支持精确匹配 symbol（如 'lr888'）或按品种前缀匹配（如 'lr' 匹配 lr888/lr777/lr2605 等）。
+DEFAULT_SKIP_SYMBOLS: List[str] = ['lr']
+
+# 跳过清单配置文件名，默认放在数据库同级目录。
+SKIP_CONFIG_FILENAME = 'update_skip_symbols.json'
 
 
 def parse_table_name(table_name: str) -> Optional[Tuple[str, str, str]]:
@@ -47,6 +55,64 @@ def parse_table_name(table_name: str) -> Optional[Tuple[str, str, str]]:
     period = m.group(2).upper()
     adjust = m.group(3).lower()
     return symbol, period, adjust
+
+
+def is_symbol_skipped(symbol: str, skip_symbols: List[str]) -> bool:
+    """
+    判断某个 symbol 是否应被跳过。
+
+    匹配规则：
+        - 精确匹配：skip_symbols 中的条目与 symbol 完全一致
+        - 前缀匹配：symbol 以 skip_symbols 中的条目开头（用于按品种跳过）
+    """
+    if not skip_symbols:
+        return False
+    s = symbol.strip().lower()
+    for skip in skip_symbols:
+        skip = skip.strip().lower()
+        if not skip:
+            continue
+        if s == skip or s.startswith(skip):
+            return True
+    return False
+
+
+def load_skip_symbols(config_path: Optional[str] = None,
+                      db_dir: Optional[str] = None) -> List[str]:
+    """
+    加载跳过品种列表。
+
+    优先级：
+        1. config_path 指定的 JSON 文件
+        2. db_dir 目录下的 update_skip_symbols.json
+        3. 返回默认列表 DEFAULT_SKIP_SYMBOLS
+
+    JSON 文件格式示例：
+        ["lr", "wh", "ri"]
+    或
+        {"skip_symbols": ["lr", "wh", "ri"]}
+    """
+    candidates = []
+    if config_path:
+        candidates.append(config_path)
+    if db_dir:
+        candidates.append(os.path.join(db_dir, SKIP_CONFIG_FILENAME))
+
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                import json
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    return [str(x).strip() for x in data if str(x).strip()]
+                if isinstance(data, dict):
+                    symbols = data.get('skip_symbols', [])
+                    return [str(x).strip() for x in symbols if str(x).strip()]
+            except Exception as e:
+                print(f"[警告] 读取跳过配置 {path} 失败: {e}，使用默认配置")
+
+    return list(DEFAULT_SKIP_SYMBOLS)
 
 
 def get_adjust_type_code(adjust: str) -> str:
@@ -136,23 +202,34 @@ def update_single_table(
 
         adjust_type = get_adjust_type_code(adjust)
 
-        # 4. 从 API 获取缺失数据
-        df_new = fetch_data_from_api(
-            symbol=symbol,
-            start_date=fetch_start,
-            end_date=fetch_end,
-            username=username,
-            password=password,
-            kline_period=period,
-            adjust_type=adjust_type,
-            depth='no',
-        )
+        # 4. 从 API 获取缺失数据（带重试）
+        df_new = None
+        last_error = ''
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            df_new = fetch_data_from_api(
+                symbol=symbol,
+                start_date=fetch_start,
+                end_date=fetch_end,
+                username=username,
+                password=password,
+                kline_period=period,
+                adjust_type=adjust_type,
+                depth='no',
+            )
+            if df_new is not None and not df_new.empty:
+                break
+            last_error = 'API 返回空'
+            if attempt < max_retries:
+                wait = attempt * 2  # 2s, 4s
+                print(f"  [重试 {attempt}/{max_retries}] {table_name} 请求为空，{wait}s 后重试...")
+                time.sleep(wait)
 
         # 5. 如果 API 没有返回数据，直接返回
         if df_new is None or df_new.empty:
             result['success'] = True
             result['after'] = result['before']
-            result['message'] += ' | 无新增数据 (API 返回空或合约已到期/无数据)'
+            result['message'] += f' | 无新增数据 ({last_error}，已重试 {max_retries} 次)'
             return result
 
         # 6. 读取现有数据并合并
@@ -205,6 +282,8 @@ def update_kline_db(
     tables_filter: Optional[List[str]] = None,
     sleep_between_symbols: float = DEFAULT_SLEEP,
     progress_callback: Optional[callable] = None,
+    skip_symbols: Optional[List[str]] = None,
+    skip_config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     对指定 SQLite 数据库执行批量增量更新。
@@ -215,6 +294,8 @@ def update_kline_db(
         tables_filter: 仅更新指定表名列表，None 表示全部
         sleep_between_symbols: 每个表处理完休息秒数
         progress_callback: 进度回调函数，签名 fn(idx, total, table_name, result)
+        skip_symbols: 直接指定要跳过的 symbol 列表，None 则读取配置文件或默认列表
+        skip_config_path: 跳过品种配置文件路径，JSON 格式
 
     Returns:
         {
@@ -225,6 +306,7 @@ def update_kline_db(
             'success_count': int,
             'fail_count': int,
             'total_added': int,
+            'skipped_count': int,
             'details': List[Dict],
             'log_path': str,
         }
@@ -247,6 +329,16 @@ def update_kline_db(
 
     reset_auth()
 
+    # 确定跳过列表
+    db_dir = os.path.dirname(db_path)
+    effective_skip_symbols = (
+        skip_symbols
+        if skip_symbols is not None
+        else load_skip_symbols(skip_config_path, db_dir)
+    )
+    if effective_skip_symbols:
+        print(f"[配置] 本次更新将跳过以下品种/合约: {effective_skip_symbols}")
+
     results = []
     conn = sqlite3.connect(db_path, timeout=60)
     try:
@@ -255,11 +347,33 @@ def update_kline_db(
             tables = [t for t in tables if t[0] in tables_filter]
 
         for idx, (table_name, symbol, period, adjust) in enumerate(tables, 1):
-            res = update_single_table(
-                conn, table_name, symbol, period, adjust,
-                username, password, end_date, db_path
-            )
-            results.append(res)
+            # 对已知数据源缺失的品种/合约直接跳过
+            if is_symbol_skipped(symbol, effective_skip_symbols):
+                _, cache_end = get_table_time_range(conn, table_name)
+                res = {
+                    'table': table_name,
+                    'success': True,
+                    'before': 0,
+                    'after': 0,
+                    'added': 0,
+                    'skipped': True,
+                    'message': f'已跳过（symbol {symbol} 在跳过列表中，数据源已知缺失）',
+                }
+                try:
+                    count_df = pd.read_sql_query(f'SELECT COUNT(*) as cnt FROM "{table_name}"', conn)
+                    res['before'] = int(count_df['cnt'].iloc[0])
+                    res['after'] = res['before']
+                    if cache_end is not None:
+                        res['message'] += f' | 当前最新 {cache_end}'
+                except Exception:
+                    pass
+                results.append(res)
+            else:
+                res = update_single_table(
+                    conn, table_name, symbol, period, adjust,
+                    username, password, end_date, db_path
+                )
+                results.append(res)
 
             if progress_callback:
                 progress_callback(idx, len(tables), table_name, res)
@@ -272,6 +386,7 @@ def update_kline_db(
 
     success_count = sum(1 for r in results if r['success'])
     fail_count = len(results) - success_count
+    skipped_count = sum(1 for r in results if r.get('skipped'))
     total_added = sum(r['added'] for r in results)
 
     # 保存汇总日志
@@ -291,6 +406,7 @@ def update_kline_db(
         'total_tables': len(results),
         'success_count': success_count,
         'fail_count': fail_count,
+        'skipped_count': skipped_count,
         'total_added': total_added,
         'details': results,
         'log_path': log_path,

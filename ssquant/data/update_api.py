@@ -15,8 +15,10 @@ K 线数据库增量更新 HTTP API 服务
     POST /update
     {
         "db_path": "D:\\data\\kline_data.db",
-        "end_date": "2026-07-07",      // 可选，默认今天
-        "tables": ["rb888_1M_raw"]      // 可选，默认全部
+        "end_date": "2026-07-07",          // 可选，默认今天
+        "tables": ["rb888_1M_raw"],        // 可选，默认全部
+        "skip_symbols": ["lr"],            // 可选，默认读取配置文件或默认列表
+        "skip_config_path": "..."          // 可选，跳过品种配置文件
     }
 
     GET /health
@@ -47,6 +49,8 @@ class UpdateRequest(BaseModel):
     db_path: str = Field(..., description="目标 SQLite 数据库路径")
     end_date: Optional[str] = Field(None, description="更新截止日期 YYYY-MM-DD，默认今天")
     tables: Optional[List[str]] = Field(None, description="仅更新的表名列表，默认全部")
+    skip_symbols: Optional[List[str]] = Field(None, description="跳过的品种/合约列表")
+    skip_config_path: Optional[str] = Field(None, description="跳过品种配置文件路径")
 
 
 class UpdateResponse(BaseModel):
@@ -56,6 +60,7 @@ class UpdateResponse(BaseModel):
     total_tables: int
     success_count: int
     fail_count: int
+    skipped_count: int
     total_added: int
     log_path: str
     details: Optional[list] = None
@@ -75,12 +80,14 @@ async def update(req: UpdateRequest):
     try:
         result = await loop.run_in_executor(
             _executor,
-            update_kline_db,
-            req.db_path,
-            req.end_date,
-            req.tables,
-            0.5,
-            None,
+            lambda: update_kline_db(
+                db_path=req.db_path,
+                end_date=req.end_date,
+                tables_filter=req.tables,
+                sleep_between_symbols=0.5,
+                skip_symbols=req.skip_symbols,
+                skip_config_path=req.skip_config_path,
+            ),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"更新失败: {e}")
@@ -95,6 +102,7 @@ async def update(req: UpdateRequest):
         total_tables=result['total_tables'],
         success_count=result['success_count'],
         fail_count=result['fail_count'],
+        skipped_count=result.get('skipped_count', 0),
         total_added=result['total_added'],
         log_path=result['log_path'],
         details=result.get('details'),

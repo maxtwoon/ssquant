@@ -1179,28 +1179,58 @@ def _try_data_server_api(symbol, start_date=None, end_date=None, kline_period='1
 
         for api_base in api_bases:
             url = f"{api_base}/api/futures/history"
-            try:
-                resp = requests.get(url, params=params, timeout=(20, 180))
-            except requests.exceptions.ConnectionError:
+            # 429 限流时进行指数退避重试
+            for attempt in range(1, 4):
+                try:
+                    # 使用新 session 并关闭连接，避免节点切换时的连接状态污染
+                    with requests.Session() as sess:
+                        sess.headers.update({'Connection': 'close'})
+                        resp = sess.get(url, params=params, timeout=(20, 180))
+                    break
+                except requests.exceptions.ConnectionError as e:
+                    print(f"[data_server API] 连接错误: {symbol} {desc} via {api_base}: {e}")
+                    resp = None
+                    break
+                except requests.Timeout as e:
+                    print(f"[data_server API] 超时: {symbol} {desc} via {api_base}: {e}")
+                    resp = None
+                    break
+                except Exception as e:
+                    print(f"[data_server API] 请求异常: {symbol} {desc} via {api_base}: {e}")
+                    resp = None
+                    break
+            else:
+                resp = None
+
+            if resp is None:
                 continue
-            except Exception:
+
+            if resp.status_code == 429:
+                wait = 2 ** attempt
+                print(f"[data_server API] HTTP 429 (限流): {symbol} {desc} via {api_base}，等待 {wait}s 后重试")
+                time.sleep(wait)
                 continue
 
             if resp.status_code != 200:
+                print(f"[data_server API] HTTP {resp.status_code}: {symbol} {desc} via {api_base}")
                 continue
 
             try:
                 result = resp.json()
-            except Exception:
+            except Exception as e:
+                print(f"[data_server API] JSON 解析失败: {symbol} {desc} via {api_base}: {e}")
                 continue
 
             if result.get('code') != 0:
+                print(f"[data_server API] 业务错误 code={result.get('code')}, msg={result.get('message')} "
+                      f"{symbol} {desc} via {api_base}")
                 continue
 
             data_obj = result.get('data', {})
             records = data_obj.get('klines', []) if isinstance(data_obj, dict) else data_obj
 
             if not records:
+                print(f"[data_server API] 返回空数据: {symbol} {desc} via {api_base}")
                 continue
 
             df = pd.DataFrame(records)
